@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="assets/agent-halo-readme-banner.png" alt="Agent Halo" width="760">
+  <img src="assets/agent-halo-windows-preview.png" alt="Agent Halo Windows Codex quota panel" width="594">
 </div>
 
 <h1 align="center">Agent Halo</h1>
