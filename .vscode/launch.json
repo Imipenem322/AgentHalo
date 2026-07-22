@@ -1,0 +1,55 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug AgentHaloMac",
+      "type": "swift",
+      "request": "launch",
+      "cwd": "${workspaceFolder}/src/macos",
+      "target": "AgentHaloMac",
+      "configuration": "debug",
+      "args": [],
+      "preLaunchTask": "swift: Build Debug AgentHaloMac (src/macos)"
+    },
+    {
+      "name": "Debug AgentHaloCoreChecks",
+      "type": "swift",
+      "request": "launch",
+      "cwd": "${workspaceFolder}/src/macos",
+      "target": "AgentHaloCoreChecks",
+      "configuration": "debug",
+      "args": [],
+      "preLaunchTask": "swift: Build Debug AgentHaloCoreChecks (src/macos)"
+    },
+    {
+      "name": "Debug AgentHaloDiagnostics",
+      "type": "swift",
+      "request": "launch",
+      "cwd": "${workspaceFolder}/src/macos",
+      "target": "AgentHaloDiagnostics",
+      "configuration": "debug",
+      "args": [],
+      "preLaunchTask": "swift: Build Debug AgentHaloDiagnostics (src/macos)"
+    },
+    {
+      "name": "Debug ClaudeCodeStatusHook",
+      "type": "swift",
+      "request": "launch",
+      "cwd": "${workspaceFolder}/src/macos",
+      "target": "ClaudeCodeStatusHook",
+      "configuration": "debug",
+      "args": [],
+      "preLaunchTask": "swift: Build Debug ClaudeCodeStatusHook (src/macos)"
+    },
+    {
+      "name": "Debug ClaudeCodeStatusLineProxy",
+      "type": "swift",
+      "request": "launch",
+      "cwd": "${workspaceFolder}/src/macos",
+      "target": "ClaudeCodeStatusLineProxy",
+      "configuration": "debug",
+      "args": [],
+      "preLaunchTask": "swift: Build Debug ClaudeCodeStatusLineProxy (src/macos)"
+    }
+  ]
+}

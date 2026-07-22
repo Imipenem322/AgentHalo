@@ -1,0 +1,30 @@
+# Build and diagnostic outputs
+outputs/
+.build/
+bin/
+obj/
+CodexHalo.ico
+*renders*/
+*-package-*/
+package-*/
+*-self-test.txt
+
+# IDE and editor state
+.vs/
+*.user
+*.suo
+
+# Operating-system metadata
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Python caches
+__pycache__/
+*.pyc
+
+# Local agent and worktree state
+.agents/
+.codex/environments/
+.superpowers/
+.worktrees/

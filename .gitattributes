@@ -1,0 +1,24 @@
+* text=auto
+
+# Windows-native source files
+*.cs text eol=crlf
+*.ps1 text eol=crlf
+*.manifest text eol=crlf
+
+# Cross-platform source and documentation
+*.sh text eol=lf
+*.py text eol=lf
+*.swift text eol=lf
+*.json text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.md text eol=lf
+
+# Binary assets and release archives
+*.ico binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.zip binary
+*.dmg binary

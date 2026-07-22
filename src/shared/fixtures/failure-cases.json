@@ -1,0 +1,9 @@
+[
+  {"input": "authentication failed for account", "detail": "failure.auth_expired"},
+  {"input": "HTTP 401 unauthorized", "detail": "failure.auth_expired"},
+  {"input": "rate_limit_reached", "detail": "failure.quota_exhausted"},
+  {"input": "server overloaded", "detail": "failure.service_unavailable"},
+  {"input": "connect timeout", "detail": "failure.connection_failed"},
+  {"input": "tool command returned exit code 1", "detail": null},
+  {"input": "plain info", "detail": null}
+]

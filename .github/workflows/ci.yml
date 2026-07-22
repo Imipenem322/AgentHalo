@@ -1,0 +1,76 @@
+name: cross-platform-contract
+
+on:
+  push:
+    paths:
+      - 'src/**'
+      - 'scripts/**'
+      - '.github/workflows/**'
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'scripts/**'
+      - '.github/workflows/**'
+
+jobs:
+  shared:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install schema validator
+        run: |
+          set +e
+          set -o pipefail
+          python -m pip install -r scripts/requirements-ci.in 2>&1 | tee /tmp/pip.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            tail -n 20 /tmp/pip.log | while IFS= read -r line; do
+              echo "::error::$line"
+            done
+            exit "$status"
+          fi
+      - run: python scripts/validate_schema.py
+      - run: python scripts/generate_shared.py --check
+      - run: python scripts/check_shared.py
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: python scripts/generate_shared.py --check
+      - shell: powershell
+        run: |
+          ./scripts/build-windows.ps1
+          Start-Process -FilePath ./outputs/AgentHalo/AgentHalo.exe `
+            -ArgumentList "--self-test", "./outputs/windows-self-test.txt" -Wait
+          Get-Content ./outputs/windows-self-test.txt
+
+  macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: python scripts/generate_shared.py --check
+      - name: Run macOS core checks
+        working-directory: src/macos
+        run: |
+          set +e
+          set -o pipefail
+          swift run AgentHaloCoreChecks 2>&1 | tee /tmp/agenthalo-swift.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            tail -n 30 /tmp/agenthalo-swift.log | while IFS= read -r line; do
+              echo "::error::$line"
+            done
+            exit "$status"
+          fi
+      - working-directory: src/macos
+        run: swift build -c release --product AgentHaloMac
