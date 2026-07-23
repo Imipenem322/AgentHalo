@@ -22,7 +22,7 @@ public enum SessionAggregator {
     public static func aggregate(
         snapshots: [SessionSnapshot],
         settings: HaloSettings,
-        recentFailure: CodexFailure?,
+        recentFailure: CodexFailure? = nil,
         codexRunning: Bool,
         focusedAgent: AgentKind = .codex,
         now: Date = Date()
