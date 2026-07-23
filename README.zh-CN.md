@@ -8,7 +8,7 @@
 
 <div align="center">
   <p>
-    <img src="https://img.shields.io/badge/版本-0.14.0-14B8A6?style=flat-square" alt="版本 0.14.0"/>
+    <img src="https://img.shields.io/badge/版本-0.15.0-14B8A6?style=flat-square" alt="版本 0.15.0"/>
     <img src="https://img.shields.io/badge/许可证-MIT-2563EB?style=flat-square" alt="MIT 许可证"/>
     <img src="https://img.shields.io/badge/Windows-仅支持%20Codex-0078D4?style=flat-square&logo=windows" alt="Windows 仅支持 Codex"/>
   </p>
