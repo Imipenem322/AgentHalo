@@ -2,6 +2,7 @@ import AppKit
 import AgentHaloCore
 
 let packagedVerificationArgument = "--packaged-verification"
+let app = NSApplication.shared
 
 if CommandLine.arguments.contains("--self-check") {
     Task { @MainActor in
@@ -9,10 +10,9 @@ if CommandLine.arguments.contains("--self-check") {
         print("PASS AgentHaloMac checks")
         exit(0)
     }
-    RunLoop.main.run()
+    app.run()
 }
 
-let app = NSApplication.shared
 let runtimeMode: UsageMonitoringRuntimeMode = CommandLine.arguments.contains(packagedVerificationArgument)
     ? .packagedVerification
     : .production

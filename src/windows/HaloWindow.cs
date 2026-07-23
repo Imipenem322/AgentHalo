@@ -31,7 +31,18 @@ namespace CodexHalo
 public sealed class HaloWindow : Window
     {
         private const double HaloSize = 112;
+        private const int ExtendedWindowStyleIndex = -20;
+        private const int ExtendedStyleTopmost = 0x00000008;
+        private const int ExtendedStyleToolWindow = 0x00000080;
+        private const int ExtendedStyleNoActivate = 0x08000000;
+        private const uint SetWindowPosNoSize = 0x0001;
+        private const uint SetWindowPosNoMove = 0x0002;
+        private const uint SetWindowPosNoActivate = 0x0010;
+        private const uint SetWindowPosNoOwnerZOrder = 0x0200;
+        private static readonly IntPtr TopmostWindowOrder = new IntPtr(-1);
         private static readonly int[] HaloScalePresets = { 75, 100, 125 };
+        private static readonly TimeSpan RuntimeStateRefreshInterval =
+            TimeSpan.FromSeconds(1);
         private readonly HaloSettings settings;
         private readonly CodexSessionMonitor monitor;
         private readonly HaloVisual visual;
@@ -49,8 +60,12 @@ public sealed class HaloWindow : Window
         private HaloState? demoState;
         private ErrorPresentation? demoErrorPresentation;
         private bool codexWasForeground;
+        private IntPtr windowHandle;
+        private IntPtr topmostGuardForeground;
+        private DateTime nextTopmostGuardUtc = DateTime.MinValue;
         private DateTime activeErrorUtc;
         private DateTime errorDimmedUtc;
+        private DateTime nextRuntimeStateRefreshUtc = DateTime.MinValue;
         private ErrorPresentation errorPresentation = ErrorPresentation.Flashing;
 
         public HaloWindow(HaloSettings appSettings)
@@ -145,6 +160,7 @@ public sealed class HaloWindow : Window
             Loaded += OnLoaded;
             Closing += OnClosing;
             SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
+            SystemEvents.SessionSwitch += OnSessionSwitch;
 
             tray = new Forms.NotifyIcon();
             tray.Text = "Agent Halo";
@@ -187,13 +203,43 @@ public sealed class HaloWindow : Window
             });
         }
 
+        internal static DateTime NextRuntimeStateRefreshUtc(DateTime now)
+        {
+            return now.Add(RuntimeStateRefreshInterval);
+        }
+
+        internal static bool IsRuntimeStateRefreshDue(DateTime now,
+            DateTime nextRefreshUtc)
+        {
+            return now >= nextRefreshUtc;
+        }
+
+        internal static bool ShouldRefreshRuntimeState(bool foregroundChanged,
+            bool errorIsDimmed, DateTime now, DateTime nextRefreshUtc)
+        {
+            return foregroundChanged || errorIsDimmed ||
+                IsRuntimeStateRefreshDue(now, nextRefreshUtc);
+        }
+
+        internal static bool ShouldShowGreenStandby(AggregateSnapshot snapshot,
+            bool previewActive)
+        {
+            return !previewActive && snapshot != null &&
+                snapshot.Presence == AgentPresenceState.Standby &&
+                snapshot.TurnPhase == AgentTurnPhase.None &&
+                String.Equals(snapshot.Label, "STANDBY",
+                    StringComparison.OrdinalIgnoreCase);
+        }
+
         private void OnLoaded(object sender, RoutedEventArgs e)
         {
             RestorePosition();
             RecoverHaloIfOffscreen();
             monitor.Start();
             RefreshState();
-            codexWasForeground = IsCodexForeground();
+            IntPtr foregroundHandle = GetForegroundWindow();
+            codexWasForeground = IsCodexForeground(foregroundHandle);
+            CheckAndRestoreTopmost(foregroundHandle, true);
             foregroundTimer.Start();
             if (performanceTimer != null)
             {
@@ -206,13 +252,32 @@ public sealed class HaloWindow : Window
         {
             if (!Dispatcher.HasShutdownStarted)
             {
-                Dispatcher.BeginInvoke(new Action(RecoverHaloIfOffscreen));
+                Dispatcher.BeginInvoke(new Action(delegate
+                {
+                    RecoverHaloIfOffscreen();
+                    CheckAndRestoreTopmost(GetForegroundWindow(), true);
+                }));
+            }
+        }
+
+        private void OnSessionSwitch(object sender, SessionSwitchEventArgs e)
+        {
+            if (e.Reason == SessionSwitchReason.SessionUnlock &&
+                !Dispatcher.HasShutdownStarted)
+            {
+                Dispatcher.BeginInvoke(new Action(delegate
+                {
+                    CheckAndRestoreTopmost(GetForegroundWindow(), true);
+                }));
             }
         }
 
         private void OnForegroundTick(object sender, EventArgs e)
         {
-            bool codexIsForeground = IsCodexForeground();
+            DateTime now = DateTime.UtcNow;
+            IntPtr foregroundHandle = GetForegroundWindow();
+            bool codexIsForeground = IsCodexForeground(foregroundHandle);
+            CheckAndRestoreTopmost(foregroundHandle, false);
             if (codexIsForeground && !codexWasForeground && !demoState.HasValue &&
                 aggregate != null && aggregate.State == HaloState.Done)
             {
@@ -230,8 +295,14 @@ public sealed class HaloWindow : Window
                     errorDimmedUtc = DateTime.UtcNow;
                 }
             }
-            if (codexIsForeground != codexWasForeground ||
-                errorPresentation == ErrorPresentation.Dim)
+            // Session files do not change when Codex exits, and a completed
+            // session expires without a new lifecycle event. Re-evaluate the
+            // aggregate periodically so both transitions reach the halo.
+            if (ShouldRefreshRuntimeState(
+                    codexIsForeground != codexWasForeground,
+                    errorPresentation == ErrorPresentation.Dim,
+                    now,
+                    nextRuntimeStateRefreshUtc))
             {
                 RefreshState();
             }
@@ -240,20 +311,26 @@ public sealed class HaloWindow : Window
 
         private static bool IsCodexForeground()
         {
+            return IsCodexForeground(GetForegroundWindow());
+        }
+
+        private static bool IsCodexForeground(IntPtr handle)
+        {
             try
             {
-                IntPtr handle = GetForegroundWindow();
                 if (handle == IntPtr.Zero)
                 {
                     return false;
                 }
                 uint processId;
                 GetWindowThreadProcessId(handle, out processId);
-                Process process = Process.GetProcessById((int)processId);
-                return process.ProcessName.IndexOf("codex",
-                           StringComparison.OrdinalIgnoreCase) >= 0 ||
-                       process.MainWindowTitle.IndexOf("codex",
-                           StringComparison.OrdinalIgnoreCase) >= 0;
+                using (Process process = Process.GetProcessById((int)processId))
+                {
+                    return process.ProcessName.IndexOf("codex",
+                               StringComparison.OrdinalIgnoreCase) >= 0 ||
+                           process.MainWindowTitle.IndexOf("codex",
+                               StringComparison.OrdinalIgnoreCase) >= 0;
+                }
             }
             catch
             {
@@ -263,9 +340,69 @@ public sealed class HaloWindow : Window
 
         private void OnSourceInitialized(object sender, EventArgs e)
         {
-            IntPtr handle = new WindowInteropHelper(this).Handle;
-            int style = GetWindowLong(handle, -20);
-            SetWindowLong(handle, -20, style | 0x08000000 | 0x00000080);
+            windowHandle = new WindowInteropHelper(this).Handle;
+            int style = GetWindowLong(windowHandle, ExtendedWindowStyleIndex);
+            SetWindowLong(windowHandle, ExtendedWindowStyleIndex,
+                style | ExtendedStyleNoActivate | ExtendedStyleToolWindow);
+        }
+
+        private void CheckAndRestoreTopmost(IntPtr foregroundHandle, bool force)
+        {
+            DateTime nowUtc = DateTime.UtcNow;
+            if (!force && !TopmostGuardPolicy.IsDue(
+                    nowUtc, nextTopmostGuardUtc))
+            {
+                return;
+            }
+
+            nextTopmostGuardUtc = TopmostGuardPolicy.NextCheckUtc(nowUtc);
+            bool foregroundChanged =
+                foregroundHandle != topmostGuardForeground;
+            topmostGuardForeground = foregroundHandle;
+            if (!settings.AlwaysOnTop)
+            {
+                return;
+            }
+
+            bool nativeTopmost = windowHandle != IntPtr.Zero &&
+                (GetWindowLong(windowHandle, ExtendedWindowStyleIndex) &
+                    ExtendedStyleTopmost) != 0;
+            bool d3dFullScreenActive = IsD3DFullScreenActive();
+
+            if (!TopmostGuardPolicy.ShouldRestore(
+                    true,
+                    d3dFullScreenActive,
+                    nativeTopmost,
+                    foregroundChanged,
+                    force))
+            {
+                return;
+            }
+
+            RestoreNativeTopmost(windowHandle);
+            if (details.IsVisible)
+            {
+                details.Topmost = true;
+                RestoreNativeTopmost(new WindowInteropHelper(details).Handle);
+            }
+        }
+
+        private static void RestoreNativeTopmost(IntPtr handle)
+        {
+            if (handle == IntPtr.Zero)
+            {
+                return;
+            }
+            SetWindowPos(handle, TopmostWindowOrder, 0, 0, 0, 0,
+                SetWindowPosNoSize | SetWindowPosNoMove |
+                SetWindowPosNoActivate | SetWindowPosNoOwnerZOrder);
+        }
+
+        private static bool IsD3DFullScreenActive()
+        {
+            UserNotificationState state;
+            return SHQueryUserNotificationState(out state) == 0 &&
+                state == UserNotificationState.RunningD3DFullScreen;
         }
 
         private void RestorePosition()
@@ -285,8 +422,9 @@ public sealed class HaloWindow : Window
 
         private void RefreshState()
         {
-            aggregate = monitor.GetAggregate(settings);
             bool codexRunning = CodexRuntimeReader.IsRunning();
+            aggregate = monitor.GetAggregate(settings, codexRunning);
+            nextRuntimeStateRefreshUtc = NextRuntimeStateRefreshUtc(DateTime.UtcNow);
             string appFailure;
             DateTime appFailureUtc;
             if (codexRunning && aggregate.Presence == AgentPresenceState.Standby &&
@@ -365,11 +503,8 @@ public sealed class HaloWindow : Window
                 aggregate.Presence = AgentPresenceState.Active;
             }
             int count = aggregate.Sessions == null ? 0 : aggregate.Sessions.Count;
-            bool showGreenStandby = !demoState.HasValue &&
-                aggregate.Presence == AgentPresenceState.Standby &&
-                aggregate.TurnPhase == AgentTurnPhase.None &&
-                String.Equals(aggregate.Label, "STANDBY",
-                    StringComparison.OrdinalIgnoreCase);
+            bool showGreenStandby = ShouldShowGreenStandby(aggregate,
+                demoState.HasValue);
             visual.SetSteadyDone(showGreenStandby);
             visual.SetErrorPresentation(demoErrorPresentation ?? errorPresentation);
             visual.SetState(aggregate.State, aggregate.Label, count);
@@ -634,6 +769,7 @@ public sealed class HaloWindow : Window
             MoveHaloToPrimaryScreen();
             Topmost = settings.AlwaysOnTop;
             Activate();
+            CheckAndRestoreTopmost(GetForegroundWindow(), true);
         }
 
         private void MoveHaloToPrimaryScreen()
@@ -726,6 +862,7 @@ public sealed class HaloWindow : Window
                     settings.AlwaysOnTop = topmost.Checked;
                     Topmost = settings.AlwaysOnTop;
                     details.Topmost = Topmost;
+                    CheckAndRestoreTopmost(GetForegroundWindow(), true);
                     SettingsStorage.Save(settings);
                 }));
             };
@@ -907,6 +1044,7 @@ public sealed class HaloWindow : Window
         private void OnClosing(object sender, System.ComponentModel.CancelEventArgs e)
         {
             SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
+            SystemEvents.SessionSwitch -= OnSessionSwitch;
             foregroundTimer.Stop();
             hoverHideTimer.Stop();
             if (performanceTimer != null)
@@ -951,6 +1089,25 @@ public sealed class HaloWindow : Window
 
         [DllImport("user32.dll")]
         private static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
+
+        [DllImport("user32.dll")]
+        private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter,
+            int x, int y, int cx, int cy, uint flags);
+
+        private enum UserNotificationState
+        {
+            NotPresent = 1,
+            Busy = 2,
+            RunningD3DFullScreen = 3,
+            PresentationMode = 4,
+            AcceptsNotifications = 5,
+            QuietTime = 6,
+            App = 7
+        }
+
+        [DllImport("shell32.dll")]
+        private static extern int SHQueryUserNotificationState(
+            out UserNotificationState state);
 
         [DllImport("user32.dll")]
         private static extern bool SetForegroundWindow(IntPtr hWnd);

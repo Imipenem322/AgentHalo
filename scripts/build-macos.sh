@@ -23,18 +23,15 @@ cp "$shared_locales/en.json" "$mac_locales/en.json"
 cd "$mac_root"
 swift run AgentHaloCoreChecks
 swift run AgentHaloDiagnostics --self-test "$output_root/diagnostics-self-test.txt"
+swift run AgentHaloMac --self-check
 swift build -c release --product AgentHaloDiagnostics
 swift build -c release --product AgentHaloMac
-swift build -c release --product ClaudeCodeStatusHook
-swift build -c release --product ClaudeCodeStatusLineProxy
 
 rm -rf "$app_dir"
 mkdir -p "$app_dir/Contents/MacOS" "$app_dir/Contents/Resources/agent-switch"
 cp "$binary" "$app_dir/Contents/MacOS/AgentHaloMac"
 cp -R "$core_resource_bundle" "$app_dir/AgentHaloMac_AgentHaloCore.bundle"
-cp "$mac_root/.build/release/ClaudeCodeStatusHook" "$app_dir/Contents/Resources/claude-code-status-hook"
-cp "$mac_root/.build/release/ClaudeCodeStatusLineProxy" "$app_dir/Contents/Resources/claude-code-statusline-proxy"
-cp "$agent_icon_assets"/*.svg "$app_dir/Contents/Resources/agent-switch/"
+cp "$agent_icon_assets/codex.svg" "$app_dir/Contents/Resources/agent-switch/"
 
 cat > "$app_dir/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>

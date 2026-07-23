@@ -2,7 +2,7 @@ import AppKit
 import AgentHaloCore
 
 enum DetailsPanelContentRole: Equatable {
-    case agentSwitcher
+    case agentIndicator
     case statusTitle
     case statusDetail
     case usageBody
@@ -30,7 +30,7 @@ class DetailsPanel: NSPanel {
     private let detailField = NSTextField(labelWithString: L10n.shared["status.offline_codex"])
     private let primaryQuota = QuotaRowView(title: L10n.shared["quota.5h"])
     private let secondaryQuota = QuotaRowView(title: L10n.shared["quota.weekly"])
-    private let agentToggle = AgentToggleView()
+    private let codexIcon = NSImageView()
     private let contextPill = NSView()
     private let quotaGroup = NSStackView()
     private let metadataGroup = NSStackView()
@@ -49,7 +49,6 @@ class DetailsPanel: NSPanel {
     private var topRow: NSView?
     var onMouseEntered: (() -> Void)?
     var onMouseExited: (() -> Void)?
-    var onAgentSelected: ((AgentKind) -> Void)?
 
     init() {
         super.init(
@@ -263,11 +262,8 @@ class DetailsPanel: NSPanel {
         let rgb = HaloVisualModel.stateColor(aggregate.state)
         titleField.textColor = NSColor(calibratedRed: rgb.red / 255, green: rgb.green / 255, blue: rgb.blue / 255, alpha: 1)
         detailField.stringValue = Self.localizedDetail(for: aggregate)
-        agentToggle.setAgent(aggregate.focusedAgent)
-        if aggregate.focusedAgent == .codex {
-            let isOffline = aggregate.state == .idle && aggregate.label == "OFFLINE"
-            updateContext(aggregate.sessions.first?.contextUsedPercent, isOffline: isOffline)
-        }
+        let isOffline = aggregate.state == .idle && aggregate.label == "OFFLINE"
+        updateContext(aggregate.sessions.first?.contextUsedPercent, isOffline: isOffline)
     }
 
     static func formatResetTime(_ date: Date?) -> String {
@@ -379,9 +375,11 @@ class DetailsPanel: NSPanel {
         let row = NSView()
         row.translatesAutoresizingMaskIntoConstraints = false
 
-        agentToggle.onAgentSelected = { [weak self] agent in
-            self?.onAgentSelected?(agent)
-        }
+        codexIcon.image = AgentIconAssets.image(named: "codex")
+        codexIcon.imageScaling = .scaleProportionallyDown
+        codexIcon.translatesAutoresizingMaskIntoConstraints = false
+        codexIcon.setAccessibilityLabel("Codex")
+        codexIcon.setAccessibilityRole(.image)
 
         contextPill.wantsLayer = true
         contextPill.layer?.cornerRadius = 9
@@ -396,19 +394,19 @@ class DetailsPanel: NSPanel {
         contextValue.lineBreakMode = .byTruncatingTail
         contextValue.translatesAutoresizingMaskIntoConstraints = false
 
-        row.addSubview(agentToggle)
+        row.addSubview(codexIcon)
         row.addSubview(contextPill)
         contextPill.addSubview(contextValue)
         NSLayoutConstraint.activate([
             row.heightAnchor.constraint(equalToConstant: 24),
-            agentToggle.leadingAnchor.constraint(equalTo: row.leadingAnchor),
-            agentToggle.centerYAnchor.constraint(equalTo: row.centerYAnchor),
-            agentToggle.widthAnchor.constraint(equalToConstant: 76),
-            agentToggle.heightAnchor.constraint(equalToConstant: 24),
+            codexIcon.leadingAnchor.constraint(equalTo: row.leadingAnchor),
+            codexIcon.centerYAnchor.constraint(equalTo: row.centerYAnchor),
+            codexIcon.widthAnchor.constraint(equalToConstant: 32),
+            codexIcon.heightAnchor.constraint(equalToConstant: 18),
             contextPill.trailingAnchor.constraint(equalTo: row.trailingAnchor),
             contextPill.centerYAnchor.constraint(equalTo: row.centerYAnchor),
             contextPill.widthAnchor.constraint(equalToConstant: Self.contextPillWidth),
-            contextPill.leadingAnchor.constraint(greaterThanOrEqualTo: agentToggle.trailingAnchor, constant: 10),
+            contextPill.leadingAnchor.constraint(greaterThanOrEqualTo: codexIcon.trailingAnchor, constant: 10),
             contextValue.leadingAnchor.constraint(equalTo: contextPill.leadingAnchor, constant: Self.contextPillHorizontalPadding),
             contextValue.trailingAnchor.constraint(equalTo: contextPill.trailingAnchor, constant: -Self.contextPillHorizontalPadding),
             contextValue.topAnchor.constraint(equalTo: contextPill.topAnchor, constant: 3),
@@ -418,7 +416,7 @@ class DetailsPanel: NSPanel {
     }
 
     var focusedAgentForTesting: AgentKind {
-        agentToggle.selectedAgent
+        .codex
     }
 
     var titleTextForTesting: String {
@@ -455,7 +453,7 @@ class DetailsPanel: NSPanel {
 
     var contentOrderForTesting: [DetailsPanelContentRole] {
         stack.arrangedSubviews.map { view in
-            if view === topRow { return .agentSwitcher }
+            if view === topRow { return .agentIndicator }
             if view === titleField { return .statusTitle }
             if view === detailField { return .statusDetail }
             if view === quotaGroup { return .usageBody }
@@ -559,10 +557,6 @@ class DetailsPanel: NSPanel {
         effectiveBackingScale
     }
 
-    func selectAgentForTesting(_ agent: AgentKind) {
-        agentToggle.setAgent(agent)
-        onAgentSelected?(agent)
-    }
 }
 
 @MainActor
@@ -882,138 +876,6 @@ final class RoundedMeterView: NSView {
             xRadius: radius,
             yRadius: radius
         ).fill()
-    }
-}
-
-@MainActor
-final class AgentToggleView: NSView {
-    var onAgentSelected: ((AgentKind) -> Void)?
-
-    private(set) var selectedAgent: AgentKind = .codex {
-        didSet {
-            updateSelectedState(animated: true)
-        }
-    }
-
-    private let bgView = AgentToggleContentView()
-    private let activeBg = NSView()
-    private let codexIcon = NSImageView()
-    private let claudeIcon = NSImageView()
-    private var activeBgConstraints: [NSLayoutConstraint] = []
-
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        setup()
-    }
-
-    required init?(coder: NSCoder) {
-        super.init(coder: coder)
-        setup()
-    }
-
-    private func setup() {
-        translatesAutoresizingMaskIntoConstraints = false
-
-        bgView.wantsLayer = true
-        bgView.layer?.cornerRadius = 12
-        bgView.layer?.borderWidth = 1
-        bgView.layer?.borderColor = NSColor(calibratedRed: 0.88, green: 0.88, blue: 0.88, alpha: 0.7).cgColor
-        bgView.layer?.backgroundColor = NSColor(calibratedRed: 0.96, green: 0.96, blue: 0.96, alpha: 0.7).cgColor
-        bgView.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(bgView)
-
-        activeBg.wantsLayer = true
-        activeBg.layer?.cornerRadius = 10
-        activeBg.layer?.borderWidth = 1
-        activeBg.layer?.borderColor = NSColor(calibratedRed: 0.72, green: 0.92, blue: 0.97, alpha: 0.85).cgColor
-        activeBg.layer?.backgroundColor = NSColor(calibratedRed: 0.88, green: 0.97, blue: 1.0, alpha: 1.0).cgColor
-        activeBg.layer?.shadowColor = NSColor(calibratedRed: 0.26, green: 0.70, blue: 0.80, alpha: 1).cgColor
-        activeBg.layer?.shadowOpacity = 0.12
-        activeBg.layer?.shadowRadius = 5
-        activeBg.layer?.shadowOffset = .zero
-        activeBg.translatesAutoresizingMaskIntoConstraints = false
-        bgView.addSubview(activeBg)
-
-        configureIcon(codexIcon, assetName: "codex", accessibilityLabel: "Codex")
-        configureIcon(claudeIcon, assetName: "claude-code", accessibilityLabel: "Claude Code")
-        bgView.addSubview(codexIcon)
-        bgView.addSubview(claudeIcon)
-
-        NSLayoutConstraint.activate([
-            bgView.leadingAnchor.constraint(equalTo: leadingAnchor),
-            bgView.trailingAnchor.constraint(equalTo: trailingAnchor),
-            bgView.topAnchor.constraint(equalTo: topAnchor),
-            bgView.bottomAnchor.constraint(equalTo: bottomAnchor),
-
-            codexIcon.leadingAnchor.constraint(equalTo: bgView.leadingAnchor, constant: 4),
-            codexIcon.centerYAnchor.constraint(equalTo: bgView.centerYAnchor),
-            codexIcon.widthAnchor.constraint(equalTo: bgView.widthAnchor, multiplier: 0.5, constant: -4),
-            codexIcon.heightAnchor.constraint(equalToConstant: 18),
-
-            claudeIcon.trailingAnchor.constraint(equalTo: bgView.trailingAnchor, constant: -4),
-            claudeIcon.centerYAnchor.constraint(equalTo: bgView.centerYAnchor),
-            claudeIcon.widthAnchor.constraint(equalTo: bgView.widthAnchor, multiplier: 0.5, constant: -4),
-            claudeIcon.heightAnchor.constraint(equalToConstant: 18),
-        ])
-
-        updateSelectedState(animated: false)
-    }
-
-    func setAgent(_ agent: AgentKind) {
-        guard selectedAgent != agent else { return }
-        selectedAgent = agent
-    }
-
-    private func updateSelectedState(animated: Bool) {
-        NSLayoutConstraint.deactivate(activeBgConstraints)
-
-        let targetIcon = selectedAgent == .codex ? codexIcon : claudeIcon
-
-        activeBgConstraints = [
-            activeBg.leadingAnchor.constraint(equalTo: targetIcon.leadingAnchor),
-            activeBg.trailingAnchor.constraint(equalTo: targetIcon.trailingAnchor),
-            activeBg.topAnchor.constraint(equalTo: bgView.topAnchor, constant: 2),
-            activeBg.bottomAnchor.constraint(equalTo: bgView.bottomAnchor, constant: -2)
-        ]
-
-        if animated {
-            NSAnimationContext.runAnimationGroup { context in
-                context.duration = 0.2
-                context.allowsImplicitAnimation = true
-                NSLayoutConstraint.activate(activeBgConstraints)
-                self.layoutSubtreeIfNeeded()
-            }
-        } else {
-            NSLayoutConstraint.activate(activeBgConstraints)
-        }
-
-        codexIcon.alphaValue = selectedAgent == .codex ? 1 : 0.40
-        claudeIcon.alphaValue = selectedAgent == .claudeCode ? 1 : 0.40
-    }
-
-    private func configureIcon(_ imageView: NSImageView, assetName: String, accessibilityLabel: String) {
-        imageView.image = AgentIconAssets.image(named: assetName)
-        imageView.imageScaling = .scaleProportionallyDown
-        imageView.translatesAutoresizingMaskIntoConstraints = false
-        imageView.setAccessibilityLabel(accessibilityLabel)
-        imageView.setAccessibilityRole(.image)
-    }
-
-    override func mouseDown(with event: NSEvent) {
-        let point = convert(event.locationInWindow, from: nil)
-        let isLeft = point.x < bounds.width / 2
-        let newAgent: AgentKind = isLeft ? .codex : .claudeCode
-        if newAgent != selectedAgent {
-            selectedAgent = newAgent
-            onAgentSelected?(newAgent)
-        }
-    }
-}
-
-@MainActor
-private final class AgentToggleContentView: NSView {
-    override func hitTest(_ point: NSPoint) -> NSView? {
-        nil
     }
 }
 

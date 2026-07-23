@@ -109,11 +109,9 @@ case "$mode" in
     trap 'exit 129' HUP
     verify_home="$verify_temp_dir/home"
     verify_codex_home="$verify_temp_dir/codex"
-    verify_claude_config="$verify_temp_dir/claude"
     verify_tmp="$verify_temp_dir/tmp"
     verify_diagnostics="$verify_temp_dir/diagnostics"
-    mkdir -p "$verify_home" "$verify_codex_home" "$verify_claude_config" \
-      "$verify_tmp" "$verify_diagnostics"
+    mkdir -p "$verify_home" "$verify_codex_home" "$verify_tmp" "$verify_diagnostics"
 
     real_home="${HOME:-}"
     sandbox_profile="(version 1)
@@ -122,7 +120,6 @@ case "$mode" in
 (deny process-exec (literal \"/usr/bin/security\"))
 (deny file-read* (subpath \"$real_home/.codex\"))
 (deny file-read* (subpath \"$real_home/.config/codex\"))
-(deny file-read* (subpath \"$real_home/.claude\"))
 (deny file-read* (subpath \"$real_home/.agent-halo\"))
 (deny file-read* (subpath \"$real_home/Library/Keychains\"))
 (deny file-read* (subpath \"$real_home/Library/Application Support/AgentHalo\"))
@@ -132,14 +129,12 @@ case "$mode" in
       HOME="$verify_home" \
       CFFIXED_USER_HOME="$verify_home" \
       CODEX_HOME="$verify_codex_home" \
-      CLAUDE_CONFIG_DIR="$verify_claude_config" \
       XDG_CONFIG_HOME="$verify_temp_dir/xdg" \
       TMPDIR="$verify_tmp" \
       USER="agenthalo-verify" \
       LOGNAME="agenthalo-verify" \
       PATH="/usr/bin:/bin:/usr/sbin:/sbin" \
       LANG="en_US.UTF-8" \
-      ANTHROPIC_BASE_URL="http://127.0.0.1.invalid" \
       /usr/bin/sandbox-exec -p "$sandbox_profile" "$app_binary" --packaged-verification \
       >"$verify_diagnostics/app.log" 2>&1 &
     verify_pid=$!
@@ -196,7 +191,6 @@ case "$mode" in
       HOME="$verify_home" \
       CFFIXED_USER_HOME="$verify_home" \
       CODEX_HOME="$verify_codex_home" \
-      CLAUDE_CONFIG_DIR="$verify_claude_config" \
       XDG_CONFIG_HOME="$verify_temp_dir/xdg" \
       TMPDIR="$verify_tmp" \
       USER="agenthalo-verify" \

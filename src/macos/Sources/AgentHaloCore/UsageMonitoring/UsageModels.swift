@@ -1,11 +1,9 @@
 import Foundation
 import CryptoKit
 
-/// Provider identifiers for usage monitoring. Codex and Claude are the only
-/// supported surfaces; balance/credits/spark providers are explicitly excluded.
+/// Provider identifiers for usage monitoring.
 public enum UsageProviderID: String, Codable, Sendable {
     case codex
-    case claude
 }
 
 /// How a provider's credentials are accessed. Drives the access-mode badge

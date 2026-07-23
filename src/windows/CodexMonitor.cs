@@ -830,6 +830,8 @@ public sealed class SessionTracker
 
 public sealed class CodexSessionMonitor : IDisposable
     {
+        private static readonly TimeSpan CodexCompletionVisibleDuration =
+            TimeSpan.FromMinutes(5);
         private readonly string root;
         private readonly Dictionary<string, SessionTracker> trackers;
         private readonly CodexRealtimeActivityReader realtimeActivity;
@@ -1089,14 +1091,8 @@ public sealed class CodexSessionMonitor : IDisposable
                     return CloneSnapshot(tracker.Snapshot);
                 })
                 .ToList();
-                List<SessionSnapshot> sessions = WithoutSupersededErrors(rawSessions)
-                .Where(delegate(SessionSnapshot snapshot)
-                {
-                    return IsSessionVisible(snapshot, settings, codexRunning, now);
-                })
-                .OrderBy(delegate(SessionSnapshot snapshot) { return StatePriority(snapshot.State); })
-                .ThenByDescending(delegate(SessionSnapshot snapshot) { return snapshot.LastEventUtc; })
-                .ToList();
+                List<SessionSnapshot> sessions = SelectVisibleSessions(
+                    rawSessions, settings, codexRunning, now);
 
                 AggregateSnapshot result = new AggregateSnapshot();
                 result.Sessions = sessions;
@@ -1181,9 +1177,10 @@ public sealed class CodexSessionMonitor : IDisposable
         {
             if (snapshot.State == HaloState.Done)
             {
-                return snapshot.CompletedUtc > settings.GetAcknowledgedUtc(snapshot.ThreadId) &&
+                return codexRunning &&
+                    snapshot.CompletedUtc > settings.GetAcknowledgedUtc(snapshot.ThreadId) &&
                     snapshot.CompletedUtc >= settings.GetInstalledUtc() &&
-                    snapshot.CompletedUtc >= now.AddDays(-1);
+                    snapshot.CompletedUtc > now.Subtract(CodexCompletionVisibleDuration);
             }
             if (snapshot.Active)
             {
@@ -1191,6 +1188,26 @@ public sealed class CodexSessionMonitor : IDisposable
             }
             return snapshot.State == HaloState.Error &&
                 snapshot.LastEventUtc >= now.AddHours(-12);
+        }
+
+        internal static List<SessionSnapshot> SelectVisibleSessions(
+            IEnumerable<SessionSnapshot> rawSessions, HaloSettings settings,
+            bool codexRunning, DateTime now)
+        {
+            return WithoutSupersededErrors(rawSessions)
+                .Where(delegate(SessionSnapshot snapshot)
+                {
+                    return IsSessionVisible(snapshot, settings, codexRunning, now);
+                })
+                .OrderBy(delegate(SessionSnapshot snapshot)
+                {
+                    return StatePriority(snapshot.State);
+                })
+                .ThenByDescending(delegate(SessionSnapshot snapshot)
+                {
+                    return snapshot.LastEventUtc;
+                })
+                .ToList();
         }
 
         private static AgentTurnPhase PhaseForState(HaloState state)
@@ -1570,28 +1587,38 @@ public sealed class CodexRealtimeActivityReader
 
 public static class CodexRuntimeReader
     {
+        internal static bool IsCodexDesktopProcessName(string processName)
+        {
+            return String.Equals(processName, "codex",
+                StringComparison.OrdinalIgnoreCase);
+        }
+
         public static bool IsRunning()
         {
             try
             {
-                if (Process.GetProcessesByName("Codex").Length > 0 ||
-                    Process.GetProcessesByName("codex").Length > 0)
+                Process[] processes = Process.GetProcessesByName("codex");
+                try
                 {
-                    return true;
-                }
-                foreach (Process process in Process.GetProcesses())
-                {
-                    try
+                    foreach (Process process in processes)
                     {
-                        string name = process.ProcessName;
-                        if (!String.IsNullOrEmpty(name) &&
-                            name.IndexOf("codex", StringComparison.OrdinalIgnoreCase) >= 0)
+                        try
                         {
-                            return true;
+                            if (IsCodexDesktopProcessName(process.ProcessName))
+                            {
+                                return true;
+                            }
+                        }
+                        catch
+                        {
                         }
                     }
-                    catch
+                }
+                finally
+                {
+                    foreach (Process process in processes)
                     {
+                        process.Dispose();
                     }
                 }
             }

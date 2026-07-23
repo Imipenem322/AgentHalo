@@ -3,7 +3,7 @@
 ## Product promise
 
 Agent Halo is a quiet, always-visible desktop vital sign for coding agents. The
-current release monitors Codex and macOS Claude Code transcripts. It answers
+current release monitors Codex on Windows and macOS. It answers
 one question without making the user return to the agent window: "What needs me
 right now?"
 
@@ -11,7 +11,7 @@ right now?"
 
 1. Ambient first: readable in peripheral vision, silent by default.
 2. One organ, many states: a single original light form instead of a dashboard.
-3. Persistent completion: green breathes until the relevant completion is acknowledged.
+3. Brief completion: green breathes for up to five minutes while the Codex desktop process is running; its exit clears the completion state immediately.
 4. Honest state: infer lifecycle activity, never claim to expose hidden reasoning.
 5. Privacy first: keep lifecycle and session metadata local. Provider usage checks may call official usage APIs with OAuth credentials, but never upload session content.
 
@@ -22,7 +22,7 @@ right now?"
 | Idle | No unacknowledged work | cool white | slow nonlinear gap orbit |
 | Thinking | Turn active, no tool currently running | amber | gap drift and ring-body breathing |
 | Working | Tool, command, search, or edit running | electric blue | fast gap orbit and ring-body breathing |
-| Done | Turn completed and not acknowledged | mint | double flash, then slow ring-body breathing |
+| Done | Normal turn completed less than five minutes ago while Codex is running | mint | double flash, then slow ring-body breathing |
 | Needs you | Explicit input/approval tool requested | violet | paired pulse |
 | Error | Turn interrupted or errored | crimson | broken ring and sharp pulse |
 
@@ -31,10 +31,10 @@ right now?"
 - Windows desktop, native WPF, transparent and always on top.
 - Smooth composition-clock animation.
 - Real-time monitoring of `%USERPROFILE%\.codex\sessions`.
-- macOS Claude Code transcript monitoring from `~/.claude/projects`.
+- Native macOS Codex monitoring.
 - Multiple-session aggregation with priority ordering.
 - Click-to-inspect compact session panel.
-- Persistent completion acknowledgement.
+- Five-minute completion window and acknowledgement.
 - Tray controls, pause, live/demo modes, startup toggle, and exit.
 - Position memory and edge snapping.
 - Provider architecture prepared for additional agent lifecycle detection.
@@ -42,7 +42,7 @@ right now?"
 
 ## Platform monitoring
 
-The Windows build monitors Codex only and does not configure or poll Claude Code. The macOS build retains its existing Claude Code transcript support and focused-agent behavior.
+The Windows and macOS builds monitor Codex only.
 
 The Windows details panel exposes two Codex modes selected from the session's endpoint and credentials: official OAuth mode shows usage, while API-key mode shows session details and includes custom or third-party endpoints. Synthetic Codex failure surfacing and click-to-activate Codex remain available in both modes.
 

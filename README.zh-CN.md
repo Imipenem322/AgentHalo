@@ -33,9 +33,9 @@
 
 ## 系统要求
 
-- Windows 10 或 Windows 11
-- 已安装并使用 Codex 桌面端，或在 macOS 上使用 Claude Code
-- .NET Framework 4.8（目前的 Windows 10/11 通常已自带）
+- Windows 10/11 或 macOS 13+
+- 已安装并使用 Codex 桌面端
+- Windows 需要 .NET Framework 4.8（目前的 Windows 10/11 通常已自带）
 
 ## macOS 开发版
 
@@ -75,10 +75,10 @@ swift run AgentHaloDiagnostics --transition-strip /tmp/agent-halo-transitions
 - 拖动光环：调整位置，靠近屏幕边缘时会自动吸附。
 - 鼠标悬停：查看当前状态；官方 Codex OAuth 显示当前可用额度、剩余百分比和重置时间。
 - 使用 CCSwitch、自定义模型提供商或 API Key 时，Codex 面板会自动改为显示项目、模型和本轮输入/输出 Token，不展示 API Key、Base URL 或中转工具名称。
-- Windows 版本只监听 Codex，不会配置或轮询 Claude Code。
+- Windows 和 macOS 版本都只监听 Codex。
 - 上下文 pill 显示 Codex 的上下文占用。
 - Codex 官方额度行只在 OAuth 模式显示；自定义 API 模式使用相同高度的项目、模型和 Token 信息行，不混入虚假的官方额度。
-- 任务完成后绿色会缓慢呼吸；再次打开 Codex 后自动确认并变为不发光的稳定绿色。
+- 普通任务完成后绿色会缓慢呼吸，最多持续 5 分钟；期间有新状态会立即替换它。Codex 桌面进程仍在运行时，到期后显示不发光的稳定绿色待机；该进程退出则显示离线。
 - 右键单击：打开状态预览、暂停监听、开机启动和退出菜单。
 - 右键”光环大小”：选择 `75% / 100% / 125%`，重启后保持设置。
 - macOS 会记住光环所属显示器及相对位置；该显示器断开时临时移到主屏右上角，重新连接后恢复原位置。临时回退期间如果手动拖动光环，新位置会成为首选位置，不再返回原显示器。
@@ -90,7 +90,7 @@ swift run AgentHaloDiagnostics --transition-strip /tmp/agent-halo-transitions
 
 - 黄色长亮短暗：Agent 正在思考或规划。
 - 蓝色长亮短暗：Agent 正在执行命令、搜索、编辑文件或调用工具。
-- 绿色双闪：Agent 已完成；高亮两次后持续缓慢呼吸，直到被确认。
+- 绿色双闪：Agent 已完成；高亮两次后缓慢呼吸，最多持续 5 分钟（仅在 Codex 桌面进程仍运行时）。
 - 珊瑚橙双脉冲：Agent 正在等待 Yes、授权、确认或输入。
 - 红色：仅表示阻止任务继续的故障；未查看时爆闪，打开 Codex 后常亮，离开后变为暗红。
 - 稳定绿色：被监听的 Agent 已运行且当前没有活动任务。
@@ -104,12 +104,9 @@ swift run AgentHaloDiagnostics --transition-strip /tmp/agent-halo-transitions
 
 ## 隐私
 
-Agent Halo 只在本机读取 `%USERPROFILE%\.codex\sessions` 中的生命周期事件，
-并在 macOS 上自动配置 `~/.claude/settings.json` 中的 Claude Code
-生命周期 hooks 和 status line proxy。它会将 hook 事件写入
-`~/.agent-halo/claude-code-status.jsonl`，上下文快照写入
-`~/.agent-halo/claude-code-context.json`。它还会只读查询 `logs_2.sqlite`
-中结构化的 Codex 连接和服务故障记录。
+Agent Halo 只在本机读取 Codex 会话目录中的生命周期事件，并只读查询
+`logs_2.sqlite` 中结构化的 Codex 连接和服务故障记录。程序不会配置
+Claude Code hooks、status line，也不会读取 Claude Code 会话或凭据。
 
 为了独立刷新 Codex 额度，程序会读取现有 OAuth 登录凭据，并仅向
 `auth.openai.com` 与 `chatgpt.com` 的官方接口发起 HTTPS 请求。OAuth Token

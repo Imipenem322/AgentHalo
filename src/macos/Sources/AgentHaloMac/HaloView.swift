@@ -318,7 +318,10 @@ final class HaloView: NSView {
     }
 
     private func applyVisualState(_ state: HaloState, presentation: ErrorPresentation, answerStreaming nextAnswerStreaming: Bool) {
-        let nextSteadyDone = state == .done && aggregate.sessions.isEmpty
+        let nextSteadyDone = Self.shouldUseSteadyDone(
+            state: state,
+            sessions: aggregate.sessions
+        )
         let nextPresentation: ErrorPresentation = state == .error ? presentation : .flashing
         if visualState != state
             || steadyDone != nextSteadyDone
@@ -350,6 +353,13 @@ final class HaloView: NSView {
         answerStreaming = nextAnswerStreaming
         setAnimationFrameInterval(preferredAnimationInterval())
         redrawRing()
+    }
+
+    static func shouldUseSteadyDone(
+        state: HaloState,
+        sessions: [SessionSnapshot]
+    ) -> Bool {
+        state == .done && sessions.isEmpty
     }
 
     private func preferredAnimationInterval() -> TimeInterval {

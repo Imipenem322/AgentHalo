@@ -226,25 +226,16 @@ public actor UsageMonitoringCoordinator {
             files: files,
             keychain: keychain
         )
-        let claudeAuthStore = ClaudeAuthStore(
-            environment: environment,
-            files: files,
-            keychain: keychain
-        )
         let codexProvider = CodexUsageProvider(
             authStore: codexAuthStore,
             usageClient: CodexUsageClient(http: http)
-        )
-        let claudeProvider = ClaudeUsageProvider(
-            authStore: claudeAuthStore,
-            usageClient: ClaudeUsageClient(http: http)
         )
         let cacheURL = homeDirectory
             .appendingPathComponent(".agent-halo", isDirectory: true)
             .appendingPathComponent("usage-snapshots-v1.json")
         let cache = UsageSnapshotCache(cacheURL: cacheURL, files: files)
         return UsageMonitoringCoordinator(
-            providers: [codexProvider, claudeProvider],
+            providers: [codexProvider],
             cache: cache
         )
     }

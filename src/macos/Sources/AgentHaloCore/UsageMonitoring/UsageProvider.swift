@@ -53,8 +53,7 @@ public struct UsageRefreshResult: Sendable {
 }
 
 /// A usage provider knows how to resolve its access mode and refresh usage
-/// for a given account. Implementations are Codex/Claude-specific; this
-/// protocol is the seam the coordinator talks to.
+/// for a given account. This protocol is the seam the coordinator talks to.
 public protocol UsageProvider: Sendable {
     var providerID: UsageProviderID { get }
 

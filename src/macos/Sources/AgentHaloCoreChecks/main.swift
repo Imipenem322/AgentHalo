@@ -16,7 +16,7 @@ func expect(_ condition: Bool, _ message: String) {
 func testReducesPlanningWorkingAttentionErrorAndCompleteEvents() {
     var reducer = SessionReducer(filePath: "/tmp/session-019c6e27-e55b-73d1-87d8-4e01f1f75043.jsonl")
 
-    reducer.consume(jsonLine: #"{"timestamp":"2026-06-13T01:00:00Z","type":"session_meta","payload":{"id":"thread-a","cwd":"/Users/wjs/work/pyproj/AgentHalo"}}"#)
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-13T01:00:00Z","type":"session_meta","payload":{"id":"thread-a","cwd":"/Users/test/Projects/AgentHalo"}}"#)
     reducer.consume(jsonLine: #"{"timestamp":"2026-06-13T01:00:01Z","type":"event_msg","payload":{"type":"task_started"}}"#)
     expect(reducer.snapshot.threadId, "thread-a", "thread id")
     expect(reducer.snapshot.projectName, "AgentHalo", "project name")
@@ -92,6 +92,43 @@ func testAggregatePrioritizesActionableSessions() {
     expect(aggregate.label, "NEEDS YOU", "aggregate label")
     expect(aggregate.detail, "AttentionProject +1", "aggregate detail")
     expect(aggregate.sessions.map(\.threadId), ["attention", "done"], "aggregate sessions")
+
+    let completedBeforeNewState = SessionSnapshot(
+        threadId: "completed-before-new-state",
+        projectName: "CompletedProject",
+        workingDirectory: "",
+        state: .done,
+        action: "Complete",
+        lastEventAt: now.addingTimeInterval(-1),
+        completedAt: now.addingTimeInterval(-1),
+        active: false
+    )
+    let replacements: [(HaloState, Bool, String)] = [
+        (.thinking, true, "Thinking"),
+        (.working, true, "Running command"),
+        (.attention, true, "Needs you"),
+        (.error, false, "Interrupted"),
+    ]
+    for (state, active, action) in replacements {
+        let newState = SessionSnapshot(
+            threadId: "new-\(state.rawValue)",
+            projectName: "NewProject",
+            workingDirectory: "",
+            state: state,
+            action: action,
+            lastEventAt: now,
+            completedAt: nil,
+            active: active
+        )
+        let replacementAggregate = SessionAggregator.aggregate(
+            snapshots: [completedBeforeNewState, newState],
+            settings: HaloSettings(installedAt: now.addingTimeInterval(-600)),
+            codexRunning: true,
+            now: now
+        )
+        expect(replacementAggregate.state, state,
+               "\(state.rawValue) should replace a recent completion")
+    }
 }
 
 func testAggregateRemovesSupersededSessionErrors() {
@@ -456,22 +493,6 @@ func testSettingsDefaultsFocusedAgentToCodexWhenMissing() throws {
     expect(loaded.focusedAgent, .codex, "legacy settings should default focus to Codex")
 }
 
-func testSettingsPersistsFocusedAgent() {
-    let root = URL(fileURLWithPath: NSTemporaryDirectory())
-        .appendingPathComponent("agent-halo-focus-persist-\(UUID().uuidString)", isDirectory: true)
-    defer {
-        try? FileManager.default.removeItem(at: root)
-    }
-    let url = root.appendingPathComponent("settings.json")
-    let store = SettingsStore(settingsURL: url)
-    let settings = HaloSettings(focusedAgent: .claudeCode)
-
-    store.save(settings)
-    let loaded = store.load()
-
-    expect(loaded.focusedAgent, .claudeCode, "focused agent should persist")
-}
-
 func testAcknowledgedErrorVisibilityUsesLatestErrorTime() {
     let now = ISO8601DateFormatter().date(from: "2026-06-13T02:00:00Z")!
     let earlier = now.addingTimeInterval(-60)
@@ -505,7 +526,7 @@ func testWorkingVisibilityLiveCallOutputAndInitialTail() {
 
 func testSessionReducerCapturesCurrentCodexTurnDetailsAndRateLimitAvailability() {
     var reducer = SessionReducer(filePath: "/tmp/codex-session-details.jsonl")
-    reducer.consume(jsonLine: #"{"type":"session_meta","payload":{"id":"codex-details","cwd":"/Users/wjs/work/pyproj/AgentHalo","title":"  Resolve Usage details  "}}"#)
+    reducer.consume(jsonLine: #"{"type":"session_meta","payload":{"id":"codex-details","cwd":"/Users/test/Projects/AgentHalo","title":"  Resolve Usage details  "}}"#)
     reducer.consume(jsonLine: #"{"type":"turn_context","payload":{"model":"gpt-5.5"}}"#)
     reducer.consume(jsonLine: #"{"type":"event_msg","payload":{"type":"task_started"}}"#)
     reducer.consume(jsonLine: #"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":38000,"output_tokens":1200},"last_token_usage":{"input_tokens":2000,"output_tokens":200},"model_context_window":100000}}}"#)
@@ -624,106 +645,6 @@ func testToolFailedDoesNotBecomeFatalError() {
     reducer.consume(jsonLine: #"{"timestamp":"2026-06-13T02:00:01Z","type":"event_msg","payload":{"type":"tool_failed"}}"#, now: now.addingTimeInterval(1))
     expect(reducer.snapshot.state, .thinking, "tool_failed should keep active thinking state")
     expect(reducer.snapshot.active, true, "tool_failed should not deactivate session")
-}
-
-func testClaudeHookConfiguratorWritesUserSettingsNotLegacyClaudeJson() throws {
-    let home = URL(fileURLWithPath: NSTemporaryDirectory())
-        .appendingPathComponent("agent-halo-hook-config-\(UUID().uuidString)", isDirectory: true)
-    defer {
-        try? FileManager.default.removeItem(at: home)
-    }
-    let claudeDir = home.appendingPathComponent(".claude", isDirectory: true)
-    let settingsURL = claudeDir.appendingPathComponent("settings.json")
-    let legacyURL = home.appendingPathComponent(".claude.json")
-    let bundledHook = home.appendingPathComponent("bundle-hook")
-    try FileManager.default.createDirectory(at: claudeDir, withIntermediateDirectories: true)
-    try Data("fake hook".utf8).write(to: bundledHook)
-    try Data(#"{"hooks":{"PreToolUse":[{"matcher":".*","hooks":[{"type":"command","command":"/old/claude-code-status-hook PreToolUse"}]}]}}"#.utf8)
-        .write(to: legacyURL)
-    try Data(
-        #"{"env":{"AGENT_HALO_TEST":"1"},"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"/usr/local/bin/existing-hook PreToolUse"}]}]}}"#.utf8
-    ).write(to: settingsURL)
-
-    ClaudeHookConfigurator.configure(homeDirectory: home, bundledHookBinary: bundledHook)
-
-    let settings = try JSONSerialization.jsonObject(with: Data(contentsOf: settingsURL)) as? [String: Any]
-    let hooks = settings?["hooks"] as? [String: Any]
-    let preToolUse = hooks?["PreToolUse"] as? [[String: Any]]
-    expect(preToolUse?.count, 2, "existing PreToolUse hook should be preserved and Agent Halo should append one entry")
-    let existingHooks = preToolUse?.first?["hooks"] as? [[String: Any]]
-    let existingCommand = existingHooks?.first?["command"] as? String
-    expect(existingCommand, "/usr/local/bin/existing-hook PreToolUse", "existing user hook should not be overwritten")
-    let agentHaloHooks = preToolUse?.last?["hooks"] as? [[String: Any]]
-    let command = agentHaloHooks?.first?["command"] as? String
-    expect(command, "\(home.path)/.agent-halo/claude-code-status-hook PreToolUse", "Agent Halo hook should be appended to ~/.claude/settings.json")
-    expect(hooks?["PostToolBatch"] != nil, true, "PostToolBatch hook should be configured")
-    expect(hooks?["PermissionRequest"] != nil, true, "PermissionRequest hook should be configured")
-    expect(hooks?["PermissionDenied"] != nil, true, "PermissionDenied hook should be configured")
-    expect(settings?["env"] as? [String: String], ["AGENT_HALO_TEST": "1"], "existing settings should be preserved")
-
-    let legacy = try JSONSerialization.jsonObject(with: Data(contentsOf: legacyURL)) as? [String: Any]
-    let legacyHooks = legacy?["hooks"] as? [String: Any]
-    let legacyPreToolUse = legacyHooks?["PreToolUse"] as? [[String: Any]]
-    let legacyEntryHooks = legacyPreToolUse?.first?["hooks"] as? [[String: Any]]
-    let legacyCommand = legacyEntryHooks?.first?["command"] as? String
-    expect(legacyCommand, "/old/claude-code-status-hook PreToolUse", "legacy ~/.claude.json should not be rewritten")
-}
-
-func testClaudeStatusLineConfiguratorPreservesAndChainsExistingCommand() throws {
-    let home = URL(fileURLWithPath: NSTemporaryDirectory())
-        .appendingPathComponent("agent-halo-statusline-config-\(UUID().uuidString)", isDirectory: true)
-    defer {
-        try? FileManager.default.removeItem(at: home)
-    }
-    let claude = home.appendingPathComponent(".claude", isDirectory: true)
-    try FileManager.default.createDirectory(at: claude, withIntermediateDirectories: true)
-    let settingsURL = claude.appendingPathComponent("settings.json")
-    let originalCommand = "~/.claude/ccline/ccline"
-    let settings: [String: Any] = [
-        "statusLine": ["type": "command", "command": originalCommand, "padding": 0],
-        "theme": "dark"
-    ]
-    try JSONSerialization.data(withJSONObject: settings).write(to: settingsURL)
-    let bundledProxy = home.appendingPathComponent("bundled-statusline-proxy")
-    try Data("proxy".utf8).write(to: bundledProxy)
-
-    ClaudeStatusLineConfigurator.configure(homeDirectory: home, bundledProxyBinary: bundledProxy)
-    ClaudeStatusLineConfigurator.configure(homeDirectory: home, bundledProxyBinary: bundledProxy)
-
-    let configuredData = try Data(contentsOf: settingsURL)
-    let configured = try JSONSerialization.jsonObject(with: configuredData) as! [String: Any]
-    let statusLine = configured["statusLine"] as! [String: Any]
-    let installedProxy = home.appendingPathComponent(".agent-halo/claude-code-statusline-proxy")
-    let storedCommand = home.appendingPathComponent(".agent-halo/claude-code-statusline-original-command")
-
-    expect(statusLine["command"] as? String, installedProxy.path, "Claude statusline should use AgentHalo proxy")
-    expect(statusLine["padding"] as? Int, 0, "Claude statusline padding should be preserved")
-    expect(configured["theme"] as? String, "dark", "unrelated Claude settings should be preserved")
-    expect(try String(contentsOf: storedCommand, encoding: .utf8), originalCommand, "existing ccline command should be preserved exactly")
-    expect(FileManager.default.isExecutableFile(atPath: installedProxy.path), "installed statusline proxy should be executable")
-    expect(
-        ClaudeStatusLineConfigurator.isConfigured(homeDirectory: home),
-        "fresh AgentHalo proxy configuration should be recognized"
-    )
-
-    var externallyRewritten = configured
-    externallyRewritten["statusLine"] = [
-        "type": "command",
-        "command": originalCommand,
-        "padding": 0,
-    ]
-    try JSONSerialization.data(withJSONObject: externallyRewritten).write(to: settingsURL, options: [.atomic])
-    expect(
-        !ClaudeStatusLineConfigurator.isConfigured(homeDirectory: home),
-        "external ccline rewrite should require reconciliation"
-    )
-
-    ClaudeStatusLineConfigurator.configure(homeDirectory: home, bundledProxyBinary: bundledProxy)
-    let repaired = try JSONSerialization.jsonObject(with: Data(contentsOf: settingsURL)) as! [String: Any]
-    let repairedStatusLine = repaired["statusLine"] as! [String: Any]
-    expect(repairedStatusLine["command"] as? String, installedProxy.path, "proxy should be restored")
-    expect(try String(contentsOf: storedCommand, encoding: .utf8), originalCommand, "ccline should remain downstream")
-    expect(repaired["theme"] as? String, "dark", "unrelated settings should survive repair")
 }
 
 extension FileHandle {
@@ -953,211 +874,6 @@ func testRateLimitReaderDoesNotReturnEarlyOnContextOnlySnapshot() {
     expect(snapshot?.contextUsedPercent, 50, "context usage carried over from earlier snapshot")
 }
 
-func testClaudeStatusLineUsageParserReadsAuthoritativeContextPercent() {
-    let now = ISO8601DateFormatter().date(from: "2026-06-21T08:00:00Z")!
-    let data = Data(#"{"session_id":"cc-session","model":{"id":"claude-sonnet-4","display_name":"Sonnet 4"},"context_window":{"used_percentage":52.75,"remaining_percentage":47.25,"context_window_size":200000,"total_input_tokens":38000,"total_output_tokens":1200}}"#.utf8)
-
-    let snapshot = ClaudeStatusLineUsageParser.parse(data: data, updatedAt: now)
-
-    expect(snapshot?.sessionId, "cc-session", "Claude context session id")
-    expect(snapshot?.usedPercent, 52.75, "Claude authoritative context percent")
-    expect(snapshot?.contextWindowSize, 200_000, "Claude context window size")
-    expect(snapshot?.modelName, "claude-sonnet-4", "Claude detail model")
-    expect(snapshot?.inputTokens, 38_000, "Claude detail input tokens")
-    expect(snapshot?.outputTokens, 1_200, "Claude detail output tokens")
-    expect(snapshot?.updatedAt, now, "Claude context capture time")
-}
-
-func testClaudeContextUsageReaderKeepsLastKnownUsageForMatchingSession() throws {
-    let root = URL(fileURLWithPath: NSTemporaryDirectory())
-        .appendingPathComponent("agent-halo-claude-context-\(UUID().uuidString)", isDirectory: true)
-    defer {
-        try? FileManager.default.removeItem(at: root)
-    }
-    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-    let snapshotURL = root.appendingPathComponent("claude-code-context.json")
-    let now = ISO8601DateFormatter().date(from: "2026-06-21T08:00:00Z")!
-    let reader = ClaudeContextUsageReader(snapshotURL: snapshotURL)
-
-    let fresh = ClaudeContextUsageSnapshot(
-        sessionId: "cc-session",
-        usedPercent: 52.75,
-        contextWindowSize: 200_000,
-        updatedAt: now.addingTimeInterval(-30)
-    )
-    try JSONEncoder().encode(fresh).write(to: snapshotURL)
-
-    expect(reader.read(sessionIds: ["cc-session"], now: now)?.usedPercent, 52.75, "matching fresh Claude context")
-    expect(reader.read(sessionIds: ["other-session"], now: now) == nil, "mismatched Claude session should be rejected")
-    expect(reader.read(sessionIds: [], now: now) == nil, "missing session identity must not select arbitrary context")
-    expect(
-        reader.read(sessionIds: ["cc-session"], now: now.addingTimeInterval(301)) == nil,
-        "Claude context older than five minutes should expire"
-    )
-}
-
-func testClaudeContextUsageReaderDoesNotShareSnapshotsAcrossFiles() throws {
-    let root = URL(fileURLWithPath: NSTemporaryDirectory())
-        .appendingPathComponent("agent-halo-claude-context-cache-\(UUID().uuidString)", isDirectory: true)
-    defer {
-        try? FileManager.default.removeItem(at: root)
-    }
-    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-    let firstURL = root.appendingPathComponent("first.json")
-    let secondURL = root.appendingPathComponent("second.json")
-    let now = ISO8601DateFormatter().date(from: "2026-06-21T08:00:00Z")!
-    let first = ClaudeContextUsageSnapshot(sessionId: "shared-session", usedPercent: 10, updatedAt: now)
-    let second = ClaudeContextUsageSnapshot(sessionId: "shared-session", usedPercent: 90, updatedAt: now)
-
-    try JSONEncoder().encode(first).write(to: firstURL)
-    try JSONEncoder().encode(second).write(to: secondURL)
-    let sharedModificationDate = ISO8601DateFormatter().date(from: "2026-06-21T07:59:00Z")!
-    try FileManager.default.setAttributes([.modificationDate: sharedModificationDate], ofItemAtPath: firstURL.path)
-    try FileManager.default.setAttributes([.modificationDate: sharedModificationDate], ofItemAtPath: secondURL.path)
-
-    let firstRead = ClaudeContextUsageReader(snapshotURL: firstURL).read(sessionIds: ["shared-session"], now: now)
-    let secondRead = ClaudeContextUsageReader(snapshotURL: secondURL).read(sessionIds: ["shared-session"], now: now)
-
-    expect(firstRead?.usedPercent, 10, "first Claude context reader should read its own snapshot")
-    expect(secondRead?.usedPercent, 90, "second Claude context reader should not reuse another file's snapshot")
-}
-
-func testClaudeContextUsageStorageSeparatesSessionsAndRejectsUnsafeIds() throws {
-    let root = URL(fileURLWithPath: NSTemporaryDirectory())
-        .appendingPathComponent("agent-halo-session-usage-\(UUID().uuidString)", isDirectory: true)
-    defer { try? FileManager.default.removeItem(at: root) }
-
-    let first = ClaudeContextUsageStorage.snapshotURL(directory: root, sessionId: "session-a")
-    let second = ClaudeContextUsageStorage.snapshotURL(directory: root, sessionId: "session-b")
-
-    expect(first != nil, "safe session id should produce a snapshot URL")
-    expect(second != nil, "second safe session id should produce a snapshot URL")
-    expect(first != second, "different sessions must not share a snapshot URL")
-    expect(
-        ClaudeContextUsageStorage.snapshotURL(directory: root, sessionId: "../escape") == nil,
-        "path traversal session id must be rejected"
-    )
-}
-
-func testClaudeContextUsageReaderRequiresExactFreshSession() throws {
-    let root = URL(fileURLWithPath: NSTemporaryDirectory())
-        .appendingPathComponent("agent-halo-exact-usage-\(UUID().uuidString)", isDirectory: true)
-    defer { try? FileManager.default.removeItem(at: root) }
-    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-
-    let now = ISO8601DateFormatter().date(from: "2026-06-23T02:00:00Z")!
-    let first = ClaudeContextUsageSnapshot(
-        sessionId: "session-a",
-        usedPercent: 26.5,
-        modelName: "glm-latest",
-        inputTokens: 53_100,
-        outputTokens: 1_200,
-        updatedAt: now
-    )
-    let second = ClaudeContextUsageSnapshot(sessionId: "session-b", usedPercent: 80, updatedAt: now)
-    try ClaudeContextUsageStorage.write(first, directory: root)
-    try ClaudeContextUsageStorage.write(second, directory: root)
-
-    let reader = ClaudeContextUsageReader(snapshotsDirectory: root, legacySnapshotURL: nil)
-    expect(reader.read(sessionId: "session-a", now: now)?.usedPercent, 26.5, "exact session usage")
-    expect(reader.read(sessionId: "missing", now: now) == nil, "another session must not be substituted")
-    expect(
-        reader.read(sessionId: "session-a", now: now.addingTimeInterval(301)) == nil,
-        "usage older than five minutes must be rejected"
-    )
-}
-
-func testClaudeContextUsageReaderRetainsExactUsageWhileSessionIsLive() throws {
-    let root = URL(fileURLWithPath: NSTemporaryDirectory())
-        .appendingPathComponent("agent-halo-live-usage-\(UUID().uuidString)", isDirectory: true)
-    defer { try? FileManager.default.removeItem(at: root) }
-    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-
-    let now = ISO8601DateFormatter().date(from: "2026-06-24T09:30:00Z")!
-    let stale = ClaudeContextUsageSnapshot(
-        sessionId: "live-main",
-        usedPercent: 27,
-        modelName: "glm-5.2",
-        inputTokens: 53_016,
-        outputTokens: 852,
-        updatedAt: now.addingTimeInterval(-600)
-    )
-    try ClaudeContextUsageStorage.write(stale, directory: root)
-
-    let reader = ClaudeContextUsageReader(snapshotsDirectory: root, legacySnapshotURL: nil)
-    expect(
-        reader.read(sessionId: "live-main", now: now, freshness: .whileSessionIsLive)?.modelName,
-        "glm-5.2",
-        "an exact live Claude session should retain its last known usage beyond five minutes"
-    )
-    expect(
-        reader.read(sessionId: "other-main", now: now, freshness: .whileSessionIsLive) == nil,
-        "live-session retention must never substitute another session's usage"
-    )
-    expect(
-        reader.read(sessionId: "live-main", now: now, freshness: .recentOnly) == nil,
-        "the normal policy should continue rejecting usage older than five minutes"
-    )
-}
-
-func testClaudeContextUsageReaderMigratesMatchingLegacySnapshot() throws {
-    let root = URL(fileURLWithPath: NSTemporaryDirectory())
-        .appendingPathComponent("agent-halo-legacy-usage-\(UUID().uuidString)", isDirectory: true)
-    defer { try? FileManager.default.removeItem(at: root) }
-    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-
-    let legacyURL = root.appendingPathComponent("claude-code-context.json")
-    let now = ISO8601DateFormatter().date(from: "2026-06-23T02:00:00Z")!
-    let legacy = ClaudeContextUsageSnapshot(sessionId: "legacy-main", usedPercent: 31, updatedAt: now)
-    try JSONEncoder().encode(legacy).write(to: legacyURL)
-
-    let reader = ClaudeContextUsageReader(
-        snapshotsDirectory: root.appendingPathComponent("contexts", isDirectory: true),
-        legacySnapshotURL: legacyURL
-    )
-    expect(reader.read(sessionId: "legacy-main", now: now)?.usedPercent, 31, "matching legacy fallback")
-    expect(reader.read(sessionId: "other-main", now: now) == nil, "mismatched legacy fallback")
-}
-
-func testClaudeStatusLineProxyRuntimeCapturesUsageAndForwardsInput() throws {
-    let root = URL(fileURLWithPath: NSTemporaryDirectory())
-        .appendingPathComponent("agent-halo-statusline-runtime-\(UUID().uuidString)", isDirectory: true)
-    defer {
-        try? FileManager.default.removeItem(at: root)
-    }
-    let snapshotsDirectory = root.appendingPathComponent("claude-code-contexts", isDirectory: true)
-    let now = ISO8601DateFormatter().date(from: "2026-06-21T08:00:00Z")!
-    let input = Data(#"{"session_id":"cc-session","context_window":{"used_percentage":61.5,"context_window_size":200000}}"#.utf8)
-    let otherInput = Data(#"{"session_id":"other-session","context_window":{"used_percentage":18,"context_window_size":200000}}"#.utf8)
-
-    let captured = try ClaudeStatusLineProxyRuntime.capture(
-        input: input,
-        snapshotsDirectory: snapshotsDirectory,
-        updatedAt: now
-    )
-    _ = try ClaudeStatusLineProxyRuntime.capture(
-        input: otherInput,
-        snapshotsDirectory: snapshotsDirectory,
-        updatedAt: now
-    )
-    let forwarded = try ClaudeStatusLineProxyRuntime.runOriginalCommand(command: "cat", input: input)
-
-    expect(captured?.usedPercent, 61.5, "statusline proxy should capture Claude context")
-    expect(forwarded.standardOutput, input, "statusline proxy should forward input unchanged")
-    expect(forwarded.terminationStatus, 0, "statusline proxy should preserve successful command status")
-    let snapshotURL = ClaudeContextUsageStorage.snapshotURL(
-        directory: snapshotsDirectory,
-        sessionId: "cc-session"
-    )!
-    let stored = try JSONDecoder().decode(ClaudeContextUsageSnapshot.self, from: Data(contentsOf: snapshotURL))
-    expect(stored, captured, "statusline proxy should persist the captured context atomically")
-    let otherURL = ClaudeContextUsageStorage.snapshotURL(
-        directory: snapshotsDirectory,
-        sessionId: "other-session"
-    )!
-    expect(FileManager.default.fileExists(atPath: otherURL.path), "another Claude session should have its own snapshot")
-}
-
 func testCodexRealtimeActivityReaderDetectsAnswerStreaming() {
     let reader = CodexRealtimeActivityReader()
     let delta = #"SSE event: {"type":"response.output_text.delta","delta":"hello"}"#
@@ -1294,9 +1010,9 @@ func testAggregatorInjectsUnacknowledgedCodexFailureWhenIdle() {
     expect(acknowledged.state, .idle, "acknowledged failure should hide")
 }
 
-func testAggregatorFiltersByFocusedAgent() {
+func testAggregatorLimitsCodexCompletionToFiveMinutesAndRequiresRunningApp() {
     let now = ISO8601DateFormatter().date(from: "2026-06-13T02:00:00Z")!
-    let codexDone = SessionSnapshot(
+    let completion = SessionSnapshot(
         threadId: "codex-done",
         projectName: "CodexProject",
         workingDirectory: "",
@@ -1307,922 +1023,117 @@ func testAggregatorFiltersByFocusedAgent() {
         active: false,
         agent: .codex
     )
-    let claudeWorking = SessionSnapshot(
-        threadId: "claude-working",
-        projectName: "ClaudeProject",
-        workingDirectory: "",
-        state: .working,
-        action: "Running command",
-        lastEventAt: now.addingTimeInterval(1),
-        completedAt: nil,
-        active: true,
-        agent: .claudeCode
-    )
 
-    let codexAggregate = SessionAggregator.aggregate(
-        snapshots: [codexDone, claudeWorking],
-        settings: HaloSettings(paused: false, installedAt: now.addingTimeInterval(-60), acknowledged: [:]),
-        focusedAgent: .codex,
-        now: now.addingTimeInterval(2)
-    )
-    expect(codexAggregate.focusedAgent, .codex, "Codex aggregate should stamp focus")
-    expect(codexAggregate.state, .done, "Codex focus should ignore active Claude state")
-    expect(codexAggregate.detail, "CodexProject - Complete", "Codex focus detail")
-    expect(codexAggregate.sessions.map(\.threadId), ["codex-done"], "Codex focus sessions")
-
-    let claudeAggregate = SessionAggregator.aggregate(
-        snapshots: [codexDone, claudeWorking],
-        settings: HaloSettings(paused: false, installedAt: now.addingTimeInterval(-60), acknowledged: [:]),
-        focusedAgent: .claudeCode,
-        now: now.addingTimeInterval(2)
-    )
-    expect(claudeAggregate.focusedAgent, .claudeCode, "Claude aggregate should stamp focus")
-    expect(claudeAggregate.state, .working, "Claude focus should use Claude state")
-    expect(claudeAggregate.detail, "ClaudeProject - Running command", "Claude focus detail")
-    expect(claudeAggregate.sessions.map(\.threadId), ["claude-working"], "Claude focus sessions")
-}
-
-func testAggregatorIdleDetailUsesFocusedAgent() {
-    let now = ISO8601DateFormatter().date(from: "2026-06-13T02:00:00Z")!
-
-    let codexAggregate = SessionAggregator.aggregate(
-        snapshots: [],
-        settings: HaloSettings(installedAt: now.addingTimeInterval(-60)),
-        focusedAgent: .codex,
-        now: now
-    )
-    let claudeAggregate = SessionAggregator.aggregate(
-        snapshots: [],
-        settings: HaloSettings(installedAt: now.addingTimeInterval(-60)),
-        focusedAgent: .claudeCode,
-        now: now
-    )
-
-    expect(codexAggregate.label, "OFFLINE", "Codex idle label is offline")
-    expect(codexAggregate.detail, "Codex is not running", "Codex offline detail")
-    expect(claudeAggregate.label, "OFFLINE", "Claude idle label is offline")
-    expect(claudeAggregate.detail, "Claude Code is not running", "Claude offline detail")
-}
-
-func testAggregatorDoesNotInjectCodexFailureForClaudeFocus() {
-    let now = ISO8601DateFormatter().date(from: "2026-06-13T02:00:00Z")!
-    let failure = CodexFailure(detail: "认证已失效", eventAt: now)
-    let aggregate = SessionAggregator.aggregate(
-        snapshots: [],
-        settings: HaloSettings(installedAt: now.addingTimeInterval(-600)),
-        recentFailure: failure,
+    let settings = HaloSettings(installedAt: now.addingTimeInterval(-600))
+    let visible = SessionAggregator.aggregate(
+        snapshots: [completion],
+        settings: settings,
         codexRunning: true,
-        focusedAgent: .claudeCode,
-        now: now
+        focusedAgent: .codex,
+        now: now.addingTimeInterval(299)
     )
 
-    expect(aggregate.state, .idle, "Claude focus should ignore Codex synthetic failure")
-    expect(aggregate.detail, "Claude Code is not running", "Claude focus should keep Claude offline")
-    expect(aggregate.sessions.isEmpty, "Claude focus should not include synthetic Codex session")
-}
+    expect(visible.state, .done, "Codex completion should remain visible before five minutes")
+    expect(visible.sessions.map(\.threadId), ["codex-done"], "visible completion should stay in sessions")
 
-func testAggregatorReturnsReadyAfterCompletedSessionSettles() {
-    let now = ISO8601DateFormatter().date(from: "2026-06-13T02:00:00Z")!
-    let completion = SessionSnapshot(
-        threadId: "done",
-        projectName: "ClaudeProject",
-        workingDirectory: "",
-        state: .done,
-        action: "Complete",
-        lastEventAt: now,
-        completedAt: now,
-        active: false,
-        agent: .claudeCode
-    )
-
-    let fresh = SessionAggregator.aggregate(
+    let expired = SessionAggregator.aggregate(
         snapshots: [completion],
-        settings: HaloSettings(installedAt: now.addingTimeInterval(-60)),
-        focusedAgent: .claudeCode,
-        now: now.addingTimeInterval(2)
+        settings: settings,
+        codexRunning: true,
+        focusedAgent: .codex,
+        now: now.addingTimeInterval(300)
     )
-    expect(fresh.state, .done, "fresh completion should show done")
+    expect(expired.state, .idle, "Codex completion should expire exactly at five minutes")
+    expect(expired.sessions.isEmpty, "expired completion should be removed from sessions")
 
-    let settled = SessionAggregator.aggregate(
+    let stopped = SessionAggregator.aggregate(
         snapshots: [completion],
-        settings: HaloSettings(installedAt: now.addingTimeInterval(-60)),
-        focusedAgent: .claudeCode,
-        now: now.addingTimeInterval(12)
+        settings: settings,
+        codexRunning: false,
+        focusedAgent: .codex,
+        now: now.addingTimeInterval(299)
     )
-    expect(settled.state, .idle, "settled completion should return ready")
-    expect(settled.sessions.isEmpty, "settled completion should no longer be visible")
-}
+    expect(stopped.state, .idle, "completed session should hide immediately when Codex exits")
+    expect(stopped.sessions.isEmpty, "stopped Codex should not retain completion sessions")
 
-func testAggregatorKeepsCodexCompletionVisibleUntilAcknowledged() {
-    let now = ISO8601DateFormatter().date(from: "2026-06-13T02:00:00Z")!
-    let completion = SessionSnapshot(
-        threadId: "codex-done",
-        projectName: "CodexProject",
+    let replacements: [SessionSnapshot] = [
+        SessionSnapshot(
+            threadId: "thinking-after-done",
+            projectName: "CodexProject",
+            workingDirectory: "",
+            state: .thinking,
+            action: "Planning",
+            lastEventAt: now,
+            completedAt: nil,
+            active: true,
+            agent: .codex
+        ),
+        SessionSnapshot(
+            threadId: "working-after-done",
+            projectName: "CodexProject",
+            workingDirectory: "",
+            state: .working,
+            action: "Running command",
+            lastEventAt: now,
+            completedAt: nil,
+            active: true,
+            agent: .codex
+        ),
+        SessionSnapshot(
+            threadId: "attention-after-done",
+            projectName: "CodexProject",
+            workingDirectory: "",
+            state: .attention,
+            action: "Waiting for your choice",
+            lastEventAt: now,
+            completedAt: nil,
+            active: true,
+            agent: .codex
+        ),
+        SessionSnapshot(
+            threadId: "error-after-done",
+            projectName: "CodexProject",
+            workingDirectory: "",
+            state: .error,
+            action: "Interrupted",
+            lastEventAt: now,
+            completedAt: nil,
+            active: false,
+            agent: .codex
+        )
+    ]
+    for replacement in replacements {
+        let replaced = SessionAggregator.aggregate(
+            snapshots: [completion, replacement],
+            settings: settings,
+            codexRunning: true,
+            focusedAgent: .codex,
+            now: now
+        )
+        expect(replaced.state, replacement.state,
+               "new \(replacement.state) state should replace a recent completion")
+    }
+
+    let planAttention = SessionSnapshot(
+        threadId: "plan-attention",
+        projectName: "CodexPlan",
         workingDirectory: "",
-        state: .done,
-        action: "Complete",
-        lastEventAt: now,
-        completedAt: now,
-        active: false,
+        state: .attention,
+        action: "Waiting for your choice",
+        lastEventAt: now.addingTimeInterval(-301),
+        completedAt: now.addingTimeInterval(-301),
+        active: true,
         agent: .codex
     )
-
-    let aggregate = SessionAggregator.aggregate(
-        snapshots: [completion],
-        settings: HaloSettings(installedAt: now.addingTimeInterval(-60)),
+    let planAggregate = SessionAggregator.aggregate(
+        snapshots: [planAttention],
+        settings: settings,
+        codexRunning: true,
         focusedAgent: .codex,
-        now: now.addingTimeInterval(12)
-    )
-
-    expect(aggregate.state, .done, "Codex completion should remain visible until acknowledged")
-    expect(aggregate.sessions.map(\.threadId), ["codex-done"], "Codex completion should stay in visible sessions")
-}
-
-func testClaudeReducerMapsTranscriptEvents() {
-    let now = ISO8601DateFormatter().date(from: "2026-06-13T02:00:00Z")!
-    var reducer = ClaudeSessionReducer(filePath: "/tmp/304976ed-0876-44e9-99ce-2c9a74ab4ee2.jsonl", now: now)
-
-    reducer.consume(jsonLine: #"{"type":"user","message":{"role":"user","content":"Build Claude status"},"uuid":"user-1","timestamp":"2026-06-13T02:00:00Z","cwd":"/Users/wjs/work/pyproj/AgentHalo","sessionId":"claude-thread"}"#, now: now)
-    expect(reducer.snapshot.threadId, "claude-thread", "Claude thread id")
-    expect(reducer.snapshot.projectName, "AgentHalo", "Claude project name")
-    expect(reducer.snapshot.state, .thinking, "Claude prompt state")
-    expect(reducer.snapshot.action, "Thinking", "Claude prompt action")
-    expect(reducer.snapshot.active, "Claude prompt should be active")
-    expect(reducer.snapshot.agent, .claudeCode, "Claude reducer should stamp Claude Code agent")
-
-    reducer.consume(jsonLine: #"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"swift build"}}]},"uuid":"assistant-1","timestamp":"2026-06-13T02:00:01Z","cwd":"/Users/wjs/work/pyproj/AgentHalo","sessionId":"claude-thread"}"#, now: now.addingTimeInterval(1))
-    expect(reducer.snapshot.state, .working, "Claude tool use state")
-    expect(reducer.snapshot.action, "Running command", "Claude tool use action")
-
-    reducer.consume(jsonLine: #"{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_1","type":"tool_result","content":"ok","is_error":false}]},"uuid":"tool-result-1","timestamp":"2026-06-13T02:00:02Z","cwd":"/Users/wjs/work/pyproj/AgentHalo","sessionId":"claude-thread"}"#, now: now.addingTimeInterval(2))
-    expect(reducer.snapshot.state, .working, "Claude tool result visible state")
-    expect(reducer.snapshot.action, "Reviewing result", "Claude tool result action")
-
-    reducer.applyWorkingVisibility(now: now.addingTimeInterval(4))
-    expect(reducer.snapshot.state, .thinking, "Claude tool result should return to thinking")
-
-    reducer.consume(jsonLine: #"{"type":"system","subtype":"turn_duration","durationMs":3000,"timestamp":"2026-06-13T02:00:05Z","cwd":"/Users/wjs/work/pyproj/AgentHalo","sessionId":"claude-thread"}"#, now: now.addingTimeInterval(5))
-    expect(reducer.snapshot.state, .done, "Claude turn duration state")
-    expect(reducer.snapshot.action, "Complete", "Claude turn duration action")
-    expect(!reducer.snapshot.active, "Claude completion should be inactive")
-    expect(reducer.snapshot.completedAt != nil, "Claude completion should set completion time")
-}
-
-func testClaudeReducerIgnoresLocalCommandUserRecords() {
-    let now = ISO8601DateFormatter().date(from: "2026-06-13T02:00:00Z")!
-    var reducer = ClaudeSessionReducer(filePath: "/tmp/local-command.jsonl", now: now)
-
-    reducer.consume(jsonLine: #"{"type":"user","message":{"role":"user","content":"Build Claude status"},"timestamp":"2026-06-13T01:59:55Z","cwd":"/Users/wjs/work/pyproj/AgentHalo","sessionId":"claude-local-command"}"#, now: now.addingTimeInterval(-5))
-    reducer.consume(jsonLine: #"{"type":"system","subtype":"turn_duration","durationMs":3000,"timestamp":"2026-06-13T01:59:58Z","cwd":"/Users/wjs/work/pyproj/AgentHalo","sessionId":"claude-local-command"}"#, now: now.addingTimeInterval(-2))
-    reducer.consume(jsonLine: #"{"type":"user","isMeta":true,"message":{"role":"user","content":"<local-command-caveat>Caveat: The messages below were generated by the user while running local commands. DO NOT respond to these messages or otherwise consider them in your response unless the user explicitly asks you to.</local-command-caveat>"},"timestamp":"2026-06-13T02:00:00Z","cwd":"/Users/wjs/work/pyproj/AgentHalo","sessionId":"claude-local-command"}"#, now: now)
-    reducer.consume(jsonLine: #"{"type":"user","message":{"role":"user","content":"<command-name>/clear</command-name>\n<command-message>clear</command-message>\n<command-args></command-args>"},"timestamp":"2026-06-13T02:00:01Z","cwd":"/Users/wjs/work/pyproj/AgentHalo","sessionId":"claude-local-command"}"#, now: now.addingTimeInterval(1))
-    reducer.consume(jsonLine: #"{"type":"user","message":{"role":"user","content":"<local-command-stdout>(no content)</local-command-stdout>"},"timestamp":"2026-06-13T02:00:02Z","cwd":"/Users/wjs/work/pyproj/AgentHalo","sessionId":"claude-local-command"}"#, now: now.addingTimeInterval(2))
-
-    expect(reducer.snapshot.state, .done, "Claude local command output should not reactivate a completed turn")
-    expect(!reducer.snapshot.active, "Claude local command should not activate the session")
-}
-
-func testClaudeHookReducerMapsLifecycleEvents() {
-    let now = ISO8601DateFormatter().date(from: "2026-06-16T04:00:00Z")!
-    var reducer = ClaudeHookStatusReducer(threadId: "hook-thread", now: now)
-
-    reducer.consume(jsonLine: #"{"timestamp":"2026-06-16T04:00:00Z","event":"UserPromptSubmit","sessionId":"hook-thread","cwd":"/Users/wjs/work/pyproj/AgentHalo","source":"claude-hook"}"#, now: now)
-    expect(reducer.snapshot.threadId, "hook-thread", "hook thread id")
-    expect(reducer.snapshot.projectName, "AgentHalo", "hook project name")
-    expect(reducer.snapshot.state, .thinking, "UserPromptSubmit should enter thinking")
-    expect(reducer.snapshot.action, "Thinking", "UserPromptSubmit action")
-    expect(reducer.snapshot.active, true, "UserPromptSubmit should activate")
-    expect(reducer.snapshot.agent, .claudeCode, "hook reducer should stamp Claude Code agent")
-
-    reducer.consume(jsonLine: #"{"timestamp":"2026-06-16T04:00:01Z","event":"PreToolUse","sessionId":"hook-thread","cwd":"/Users/wjs/work/pyproj/AgentHalo","toolName":"Bash","source":"claude-hook"}"#, now: now.addingTimeInterval(1))
-    expect(reducer.snapshot.state, .working, "PreToolUse should enter working")
-    expect(reducer.snapshot.action, "Running command", "PreToolUse should map Bash to friendly command action")
-
-    reducer.consume(jsonLine: #"{"timestamp":"2026-06-16T04:00:02Z","event":"PostToolUse","sessionId":"hook-thread","cwd":"/Users/wjs/work/pyproj/AgentHalo","toolName":"Bash","source":"claude-hook"}"#, now: now.addingTimeInterval(2))
-    expect(reducer.snapshot.state, .working, "PostToolUse should remain briefly working")
-    expect(reducer.snapshot.action, "Reviewing result", "PostToolUse action")
-
-    // Visibility window is anchored on the event timestamp (04:00:02 + 1.8s = 04:00:03.8),
-    // not on `now`. A delayed tick at 04:00:04 must already see the fade.
-    reducer.applyWorkingVisibility(now: now.addingTimeInterval(4))
-    expect(reducer.snapshot.state, .thinking, "PostToolUse should settle back to thinking")
-
-    reducer.consume(jsonLine: #"{"timestamp":"2026-06-16T04:00:05Z","event":"Stop","sessionId":"hook-thread","cwd":"/Users/wjs/work/pyproj/AgentHalo","source":"claude-hook"}"#, now: now.addingTimeInterval(5))
-    expect(reducer.snapshot.state, .done, "Stop should enter done")
-    expect(reducer.snapshot.action, "Complete", "Stop action")
-    expect(reducer.snapshot.active, false, "Stop should deactivate")
-    expect(reducer.snapshot.completedAt, now.addingTimeInterval(5), "Stop should set completedAt")
-}
-
-func testClaudeHookReducerPreservesThinkingBeforeQuickToolAndUsesShortResultHold() {
-    let now = ISO8601DateFormatter().date(from: "2026-06-16T04:00:00Z")!
-    var reducer = ClaudeHookStatusReducer(threadId: "quick-tool", now: now)
-
-    reducer.consume(jsonLine: #"{"timestamp":"2026-06-16T04:00:00Z","event":"UserPromptSubmit","sessionId":"quick-tool","cwd":"/tmp","source":"claude-hook"}"#, now: now)
-    reducer.consume(jsonLine: #"{"timestamp":"2026-06-16T04:00:00.120Z","event":"PreToolUse","sessionId":"quick-tool","cwd":"/tmp","toolName":"Bash","source":"claude-hook"}"#, now: now.addingTimeInterval(0.12))
-
-    expect(reducer.snapshot.state, .thinking, "quick PreToolUse should preserve the initial thinking beat")
-    reducer.applyWorkingVisibility(now: now.addingTimeInterval(0.5))
-    expect(reducer.snapshot.state, .thinking, "thinking beat should remain visible for 0.7 seconds")
-    reducer.applyWorkingVisibility(now: now.addingTimeInterval(0.8))
-    expect(reducer.snapshot.state, .working, "pending tool action should appear after the thinking beat")
-    expect(reducer.snapshot.action, "Running command", "pending tool action should preserve the friendly tool name")
-
-    reducer.consume(jsonLine: #"{"timestamp":"2026-06-16T04:00:01Z","event":"PostToolUse","sessionId":"quick-tool","cwd":"/tmp","toolName":"Bash","source":"claude-hook"}"#, now: now.addingTimeInterval(1))
-    reducer.applyWorkingVisibility(now: now.addingTimeInterval(1.5))
-    expect(reducer.snapshot.state, .working, "PostToolUse should remain blue inside the short hold")
-    reducer.applyWorkingVisibility(now: now.addingTimeInterval(1.8))
-    expect(reducer.snapshot.state, .thinking, "PostToolUse should fade after the 0.65 second hold")
-}
-
-func testClaudeHookReducerMapsBatchAndDirectPermissionEvents() {
-    let now = ISO8601DateFormatter().date(from: "2026-06-16T04:00:00Z")!
-    var reducer = ClaudeHookStatusReducer(threadId: "new-hook-events", now: now)
-
-    reducer.consume(jsonLine: #"{"timestamp":"2026-06-16T04:00:00Z","event":"UserPromptSubmit","sessionId":"new-hook-events","cwd":"/tmp","source":"claude-hook"}"#, now: now)
-    reducer.consume(jsonLine: #"{"timestamp":"2026-06-16T04:00:01Z","event":"PostToolBatch","sessionId":"new-hook-events","cwd":"/tmp","source":"claude-hook"}"#, now: now.addingTimeInterval(1))
-    expect(reducer.snapshot.state, .working, "PostToolBatch should use the post-tool working state")
-    expect(reducer.snapshot.action, "Reviewing result", "PostToolBatch action")
-
-    reducer.consume(jsonLine: #"{"timestamp":"2026-06-16T04:00:02Z","event":"PermissionRequest","sessionId":"new-hook-events","cwd":"/tmp","source":"claude-hook"}"#, now: now.addingTimeInterval(2))
-    expect(reducer.snapshot.state, .attention, "PermissionRequest should request attention")
-    expect(reducer.snapshot.action, "Awaiting permission", "PermissionRequest action")
-
-    reducer.consume(jsonLine: #"{"timestamp":"2026-06-16T04:00:03Z","event":"PermissionDenied","sessionId":"new-hook-events","cwd":"/tmp","source":"claude-hook"}"#, now: now.addingTimeInterval(3))
-    expect(reducer.snapshot.state, .attention, "PermissionDenied should remain attention")
-    expect(reducer.snapshot.action, "Permission denied", "PermissionDenied action")
-}
-
-func testClaudeHookReducerPostToolUseFailureSurfacesThenSettles() {
-    let now = ISO8601DateFormatter().date(from: "2026-06-16T04:00:00Z")!
-    var reducer = ClaudeHookStatusReducer(threadId: "tool-failure", now: now)
-
-    reducer.consume(jsonLine: #"{"timestamp":"2026-06-16T04:00:00Z","event":"UserPromptSubmit","sessionId":"tool-failure","cwd":"/tmp","source":"claude-hook"}"#, now: now)
-    reducer.consume(jsonLine: #"{"timestamp":"2026-06-16T04:00:01Z","event":"PreToolUse","sessionId":"tool-failure","cwd":"/tmp","toolName":"Bash","source":"claude-hook"}"#, now: now.addingTimeInterval(1))
-    reducer.consume(jsonLine: #"{"timestamp":"2026-06-16T04:00:02Z","event":"PostToolUseFailure","sessionId":"tool-failure","cwd":"/tmp","toolName":"Bash","errorText":"exit 1","source":"claude-hook"}"#, now: now.addingTimeInterval(2))
-
-    expect(reducer.snapshot.state, .working, "PostToolUseFailure should stay briefly working")
-    expect(reducer.snapshot.action, "Tool failed", "PostToolUseFailure action")
-    expect(reducer.snapshot.active, true, "PostToolUseFailure keeps the turn active")
-
-    reducer.applyWorkingVisibility(now: now.addingTimeInterval(4))
-    expect(reducer.snapshot.state, .thinking, "PostToolUseFailure fades back to thinking after the visibility window")
-}
-
-func testClaudeHookReducerPermissionPromptHoldsUntilResolved() {
-    let now = ISO8601DateFormatter().date(from: "2026-06-16T04:00:00Z")!
-    var reducer = ClaudeHookStatusReducer(threadId: "perm", now: now)
-
-    reducer.consume(jsonLine: #"{"timestamp":"2026-06-16T04:00:00Z","event":"UserPromptSubmit","sessionId":"perm","cwd":"/tmp","source":"claude-hook"}"#, now: now)
-    reducer.consume(jsonLine: #"{"timestamp":"2026-06-16T04:00:01Z","event":"Notification","sessionId":"perm","cwd":"/tmp","notificationType":"permission_prompt","source":"claude-hook"}"#, now: now.addingTimeInterval(1))
-
-    expect(reducer.snapshot.state, .attention, "permission_prompt should show attention")
-    expect(reducer.snapshot.action, "Awaiting permission", "permission_prompt action")
-    expect(reducer.snapshot.active, true, "permission_prompt keeps the turn active")
-
-    // No fade-out: even minutes later, the state must still reflect the pending prompt
-    // until a real PreToolUse / Stop arrives.
-    reducer.applyWorkingVisibility(now: now.addingTimeInterval(120))
-    expect(reducer.snapshot.state, .attention, "permission_prompt should not fade automatically")
-    expect(reducer.snapshot.action, "Awaiting permission", "permission_prompt action persists")
-}
-
-func testClaudeHookReducerIdlePromptReturnsToReady() {
-    let now = ISO8601DateFormatter().date(from: "2026-06-16T04:00:00Z")!
-    var reducer = ClaudeHookStatusReducer(threadId: "idle", now: now)
-
-    reducer.consume(jsonLine: #"{"timestamp":"2026-06-16T04:00:00Z","event":"UserPromptSubmit","sessionId":"idle","cwd":"/tmp","source":"claude-hook"}"#, now: now)
-    reducer.consume(jsonLine: #"{"timestamp":"2026-06-16T04:00:01Z","event":"Notification","sessionId":"idle","cwd":"/tmp","notificationType":"idle_prompt","source":"claude-hook"}"#, now: now.addingTimeInterval(1))
-
-    expect(reducer.snapshot.state, .idle, "idle_prompt should return to idle")
-    expect(reducer.snapshot.action, "Ready", "idle_prompt action")
-    expect(reducer.snapshot.active, false, "idle_prompt should not keep the turn active")
-}
-
-func testClaudeHookIdlePromptDoesNotDriveThinkingAggregate() {
-    let now = ISO8601DateFormatter().date(from: "2026-06-18T08:24:00Z")!
-    var reducer = ClaudeHookStatusReducer(threadId: "idle-aggregate", now: now)
-    let settings = HaloSettings(
-        paused: false,
-        focusedAgent: .claudeCode,
-        installedAt: now.addingTimeInterval(-60)
-    )
-
-    reducer.consume(jsonLine: #"{"timestamp":"2026-06-18T08:24:00Z","event":"SessionStart","sessionId":"idle-aggregate","cwd":"/Users/wjs/work/pyproj/AgentHalo","source":"claude-hook"}"#, now: now)
-    reducer.consume(jsonLine: #"{"timestamp":"2026-06-18T08:24:05Z","event":"PostCompact","sessionId":"idle-aggregate","cwd":"/Users/wjs/work/pyproj/AgentHalo","source":"claude-hook"}"#, now: now.addingTimeInterval(5))
-    reducer.consume(jsonLine: #"{"timestamp":"2026-06-18T08:25:05Z","event":"Notification","sessionId":"idle-aggregate","cwd":"/Users/wjs/work/pyproj/AgentHalo","notificationType":"idle_prompt","source":"claude-hook"}"#, now: now.addingTimeInterval(65))
-
-    let aggregate = SessionAggregator.aggregate(
-        snapshots: [reducer.snapshot],
-        settings: settings,
-        focusedAgent: .claudeCode,
-        now: now.addingTimeInterval(66)
-    )
-    expect(aggregate.state, .idle, "idle_prompt should not surface as Thinking")
-    expect(aggregate.label, "OFFLINE", "idle_prompt aggregate label")
-    expect(aggregate.detail, "Claude Code is not running", "idle_prompt aggregate detail")
-}
-
-func testClaudeHookReducerStopFailureMapsToError() {
-    let now = ISO8601DateFormatter().date(from: "2026-06-16T04:00:00Z")!
-    var reducer = ClaudeHookStatusReducer(threadId: "hook-failure", now: now)
-
-    reducer.consume(jsonLine: #"{"timestamp":"2026-06-16T04:00:00Z","event":"UserPromptSubmit","sessionId":"hook-failure","cwd":"/tmp","source":"claude-hook"}"#, now: now)
-    reducer.consume(jsonLine: #"{"timestamp":"2026-06-16T04:00:01Z","event":"StopFailure","sessionId":"hook-failure","cwd":"/tmp","source":"claude-hook"}"#, now: now.addingTimeInterval(1))
-
-    expect(reducer.snapshot.state, .error, "StopFailure should become error")
-    expect(reducer.snapshot.action, "Claude Code stopped with an error", "StopFailure action")
-    expect(reducer.snapshot.active, false, "StopFailure should deactivate")
-}
-
-func testClaudeHookReducerStuckPreToolUseRecoversAfterSafetyTimeout() {
-    let now = ISO8601DateFormatter().date(from: "2026-06-16T04:00:00Z")!
-    var reducer = ClaudeHookStatusReducer(threadId: "stuck-pretool", now: now)
-
-    // Simulate a PreToolUse event that is never followed by PostToolUse
-    // (e.g. crash, test noise, hook misconfiguration).
-    reducer.consume(jsonLine: #"{"timestamp":"2026-06-16T04:00:00Z","event":"UserPromptSubmit","sessionId":"stuck-pretool","cwd":"/tmp","source":"claude-hook"}"#, now: now)
-    reducer.consume(jsonLine: #"{"timestamp":"2026-06-16T04:00:01Z","event":"PreToolUse","sessionId":"stuck-pretool","cwd":"/tmp","toolName":"Bash","source":"claude-hook"}"#, now: now.addingTimeInterval(1))
-
-    expect(reducer.snapshot.state, .working, "PreToolUse should enter working")
-
-    // After 60 seconds, still working — tool may legitimately be running.
-    reducer.applyWorkingVisibility(now: now.addingTimeInterval(61))
-    expect(reducer.snapshot.state, .working, "60 s after PreToolUse should keep working (tool may run long)")
-
-    // After 181 seconds with no follow-up event, safety net forces fade to thinking.
-    reducer.applyWorkingVisibility(now: now.addingTimeInterval(182))
-    expect(reducer.snapshot.state, .thinking, ">180 s after PreToolUse with no PostToolUse should force-fade to thinking")
-    expect(reducer.snapshot.action, "Thinking", "safety-net fade action")
-}
-
-func testClaudeHookReducerManualCompactShowsDoneThenReady() {
-    let now = ISO8601DateFormatter().date(from: "2026-06-17T04:00:00Z")!
-    var reducer = ClaudeHookStatusReducer(threadId: "manual-compact", now: now)
-    let settings = HaloSettings(
-        paused: false,
-        focusedAgent: .claudeCode,
-        installedAt: now.addingTimeInterval(-60)
-    )
-
-    reducer.consume(jsonLine: #"{"timestamp":"2026-06-17T04:00:00Z","event":"SessionStart","sessionId":"manual-compact","cwd":"/tmp","source":"claude-hook"}"#, now: now)
-    reducer.consume(jsonLine: #"{"timestamp":"2026-06-17T04:00:01Z","event":"PreCompact","sessionId":"manual-compact","cwd":"/tmp","source":"claude-hook"}"#, now: now.addingTimeInterval(1))
-    expect(reducer.snapshot.state, .working, "manual PreCompact should show Executing")
-    expect(reducer.snapshot.action, "Compressing context", "manual PreCompact action")
-
-    // Claude Code emits another SessionStart while rebuilding the compacted session.
-    // It must not erase the fact that compaction began while the prompt was idle.
-    reducer.consume(jsonLine: #"{"timestamp":"2026-06-17T04:00:02Z","event":"SessionStart","sessionId":"manual-compact","cwd":"/tmp","source":"claude-hook"}"#, now: now.addingTimeInterval(2))
-    expect(reducer.snapshot.state, .working, "SessionStart during compaction should keep Executing")
-    expect(reducer.snapshot.action, "Compressing context", "SessionStart should preserve compaction action")
-
-    reducer.consume(jsonLine: #"{"timestamp":"2026-06-17T04:00:03Z","event":"PostCompact","sessionId":"manual-compact","cwd":"/tmp","source":"claude-hook"}"#, now: now.addingTimeInterval(3))
-    expect(reducer.snapshot.state, .done, "manual PostCompact should show completion")
-    expect(reducer.snapshot.action, "Context compacted", "manual PostCompact action")
-    expect(reducer.snapshot.active, false, "manual PostCompact should deactivate")
-    expect(reducer.snapshot.completedAt, now.addingTimeInterval(3), "manual PostCompact completion time")
-
-    let fresh = SessionAggregator.aggregate(
-        snapshots: [reducer.snapshot],
-        settings: settings,
-        focusedAgent: .claudeCode,
-        now: now.addingTimeInterval(4)
-    )
-    expect(fresh.state, .done, "manual compact should briefly show green Done")
-
-    let settled = SessionAggregator.aggregate(
-        snapshots: [reducer.snapshot],
-        settings: settings,
-        focusedAgent: .claudeCode,
-        now: now.addingTimeInterval(12)
-    )
-    expect(settled.state, .idle, "manual compact should settle to gray Offline")
-    expect(settled.label, "OFFLINE", "manual compact settled label")
-}
-
-func testClaudeHookReducerActiveCompactRestoresThinking() {
-    let now = ISO8601DateFormatter().date(from: "2026-06-17T04:00:00Z")!
-    var reducer = ClaudeHookStatusReducer(threadId: "compact", now: now)
-
-    // Start a normal turn.
-    reducer.consume(jsonLine: #"{"timestamp":"2026-06-17T04:00:00Z","event":"UserPromptSubmit","sessionId":"compact","cwd":"/tmp","source":"claude-hook"}"#, now: now)
-    expect(reducer.snapshot.state, .thinking, "start in thinking")
-
-    // PreCompact should switch to working with "Compressing context".
-    reducer.consume(jsonLine: #"{"timestamp":"2026-06-17T04:00:01Z","event":"PreCompact","sessionId":"compact","cwd":"/tmp","source":"claude-hook"}"#, now: now.addingTimeInterval(1))
-    expect(reducer.snapshot.state, .working, "PreCompact should show Executing")
-    expect(reducer.snapshot.action, "Compressing context", "PreCompact action")
-    expect(reducer.snapshot.active, true, "PreCompact keeps the turn active")
-
-    // A compaction-time SessionStart must preserve the active resume state.
-    reducer.consume(jsonLine: #"{"timestamp":"2026-06-17T04:00:02Z","event":"SessionStart","sessionId":"compact","cwd":"/tmp","source":"claude-hook"}"#, now: now.addingTimeInterval(2))
-    expect(reducer.snapshot.state, .working, "SessionStart during active compaction should keep Executing")
-
-    // PostCompact should restore to thinking for an active turn.
-    reducer.consume(jsonLine: #"{"timestamp":"2026-06-17T04:00:03Z","event":"PostCompact","sessionId":"compact","cwd":"/tmp","source":"claude-hook"}"#, now: now.addingTimeInterval(3))
-    expect(reducer.snapshot.state, .thinking, "PostCompact should restore to thinking")
-    expect(reducer.snapshot.action, "Thinking", "PostCompact action")
-    expect(reducer.snapshot.active, true, "PostCompact keeps the turn active")
-
-    // Safety net: PreCompact without PostCompact should force-fade like PreToolUse.
-    var reducer2 = ClaudeHookStatusReducer(threadId: "compact-stuck", now: now)
-    reducer2.consume(jsonLine: #"{"timestamp":"2026-06-17T04:00:00Z","event":"UserPromptSubmit","sessionId":"compact-stuck","cwd":"/tmp","source":"claude-hook"}"#, now: now)
-    reducer2.consume(jsonLine: #"{"timestamp":"2026-06-17T04:00:01Z","event":"PreCompact","sessionId":"compact-stuck","cwd":"/tmp","source":"claude-hook"}"#, now: now.addingTimeInterval(1))
-    expect(reducer2.snapshot.state, .working, "PreCompact shows working")
-
-    // After >180 s with no PostCompact, safety net recovers.
-    reducer2.applyWorkingVisibility(now: now.addingTimeInterval(182))
-    expect(reducer2.snapshot.state, .thinking, "stuck PreCompact should force-fade to thinking after >180 s")
-}
-
-func testClaudeHookReducerIdleCompactTimeoutReturnsToReady() {
-    let now = ISO8601DateFormatter().date(from: "2026-06-17T04:00:00Z")!
-    var reducer = ClaudeHookStatusReducer(threadId: "idle-compact-timeout", now: now)
-
-    reducer.consume(jsonLine: #"{"timestamp":"2026-06-17T04:00:00Z","event":"SessionStart","sessionId":"idle-compact-timeout","cwd":"/tmp","source":"claude-hook"}"#, now: now)
-    reducer.consume(jsonLine: #"{"timestamp":"2026-06-17T04:00:01Z","event":"PreCompact","sessionId":"idle-compact-timeout","cwd":"/tmp","source":"claude-hook"}"#, now: now.addingTimeInterval(1))
-    reducer.applyWorkingVisibility(now: now.addingTimeInterval(182))
-
-    expect(reducer.snapshot.state, .idle, "stuck idle PreCompact should recover to Ready")
-    expect(reducer.snapshot.action, "Ready", "stuck idle PreCompact recovery action")
-    expect(reducer.snapshot.active, false, "stuck idle PreCompact should deactivate")
-}
-
-func testClaudeHookMonitorPrunesStaleReducers() throws {
-    let root = URL(fileURLWithPath: NSTemporaryDirectory())
-        .appendingPathComponent("agent-halo-claude-hook-prune-\(UUID().uuidString)", isDirectory: true)
-    defer {
-        try? FileManager.default.removeItem(at: root)
-    }
-    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-    let statusFile = root.appendingPathComponent("claude-code-status.jsonl")
-    let now = ISO8601DateFormatter().date(from: "2026-06-16T04:00:00Z")!
-
-    // Write two completions from different sessions, both long ago.
-    let old = [
-        #"{"timestamp":"2026-06-16T03:50:00Z","event":"UserPromptSubmit","sessionId":"old-session","cwd":"/tmp","source":"claude-hook"}"#,
-        #"{"timestamp":"2026-06-16T03:50:01Z","event":"PreToolUse","sessionId":"old-session","cwd":"/tmp","toolName":"Bash","source":"claude-hook"}"#,
-        #"{"timestamp":"2026-06-16T03:55:00Z","event":"UserPromptSubmit","sessionId":"newer-session","cwd":"/tmp","source":"claude-hook"}"#,
-        #"{"timestamp":"2026-06-16T03:55:01Z","event":"Stop","sessionId":"newer-session","cwd":"/tmp","source":"claude-hook"}"#,
-    ].joined(separator: "\n") + "\n"
-    try Data(old.utf8).write(to: statusFile)
-
-    let monitor = ClaudeHookStatusMonitor(statusURL: statusFile)
-    _ = monitor.refresh(now: now.addingTimeInterval(-30))
-    // Both sessions processed: old-session is active+working, newer-session is done.
-    let before = monitor.snapshots()
-    expect(before.count >= 1, true, "at least one snapshot before pruning")
-
-    // Advance time so both reducers exceed their stale thresholds. Active uses
-    // 600 s, inactive uses 300 s. The old session's last event is at 03:50:01
-    // (~10 min before `now`); adding 700 s on top lifts elapsed time to ~17 min,
-    // pruning both. The done session is well past its 300 s window.
-    _ = monitor.refresh(now: now.addingTimeInterval(700))
-    let after = monitor.snapshots()
-    expect(after.isEmpty, true, "stale reducers pruned → empty hook snapshots")
-}
-
-func testClaudeMonitorHandlesDiscoveryPendingLinesAndTruncation() throws {
-    let root = URL(fileURLWithPath: NSTemporaryDirectory())
-        .appendingPathComponent("agent-halo-claude-monitor-\(UUID().uuidString)", isDirectory: true)
-    defer {
-        try? FileManager.default.removeItem(at: root)
-    }
-    let projects = root.appendingPathComponent("projects", isDirectory: true)
-    let project = projects.appendingPathComponent("-Users-wjs-work-pyproj-AgentHalo", isDirectory: true)
-    try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
-    let file = project.appendingPathComponent("\(UUID().uuidString).jsonl")
-    let now = ISO8601DateFormatter().date(from: "2026-06-13T02:00:00Z")!
-    try Data(#"{"type":"user","message":{"role":"user","content":"Build Claude status"},"timestamp":"2026-06-13T02:00:00Z","cwd":"/Users/wjs/work/pyproj/AgentHalo","sessionId":"claude-monitor"}"#.utf8).write(to: file)
-
-    let monitor = ClaudeSessionMonitor(projectsRoot: projects)
-    _ = monitor.refresh(now: now)
-    expect(monitor.snapshots().first?.state == .idle, "Claude partial line should wait for newline")
-
-    try FileHandle(forWritingTo: file).withClose {
-        try $0.seekToEnd()
-        try $0.write(contentsOf: Data("\n".utf8))
-    }
-    _ = monitor.refresh(now: now.addingTimeInterval(1))
-    expect(monitor.snapshots().first?.state == .thinking, "Claude completed pending line should parse")
-    expect(monitor.snapshots().first?.projectName, "AgentHalo", "Claude monitor project name")
-    expect(monitor.snapshots().first?.agent, .claudeCode, "Claude monitor snapshots should carry Claude Code agent")
-
-    try Data(#"{"type":"system","subtype":"turn_duration","durationMs":3000,"timestamp":"2026-06-13T02:00:02Z","cwd":"/Users/wjs/work/pyproj/AgentHalo","sessionId":"claude-monitor"}"#.utf8).write(to: file)
-    _ = monitor.refresh(now: now.addingTimeInterval(2))
-    expect(monitor.snapshots().first?.state == .idle, "Claude truncated partial line should not parse")
-}
-
-func testClaudeHookMonitorHandlesPendingLinesAndTruncation() throws {
-    let root = URL(fileURLWithPath: NSTemporaryDirectory())
-        .appendingPathComponent("agent-halo-claude-hook-monitor-\(UUID().uuidString)", isDirectory: true)
-    defer {
-        try? FileManager.default.removeItem(at: root)
-    }
-    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-    let statusFile = root.appendingPathComponent("claude-code-status.jsonl")
-    let now = ISO8601DateFormatter().date(from: "2026-06-16T04:00:00Z")!
-
-    try Data(#"{"timestamp":"2026-06-16T04:00:00Z","event":"UserPromptSubmit","sessionId":"hook-monitor","cwd":"/Users/wjs/work/pyproj/AgentHalo","source":"claude-hook"}"#.utf8).write(to: statusFile)
-
-    let monitor = ClaudeHookStatusMonitor(statusURL: statusFile)
-    _ = monitor.refresh(now: now)
-    expect(monitor.snapshots().isEmpty, true, "partial hook line should not produce a snapshot")
-
-    try FileHandle(forWritingTo: statusFile).withClose {
-        try $0.seekToEnd()
-        try $0.write(contentsOf: Data("\n".utf8))
-    }
-    _ = monitor.refresh(now: now.addingTimeInterval(1))
-    expect(monitor.snapshots().first?.state == .thinking, "completed hook line should parse")
-    expect(monitor.snapshots().first?.agent, .claudeCode, "hook monitor snapshots should carry Claude Code agent")
-
-    try Data(#"{"timestamp":"2026-06-16T04:00:02Z","event":"Stop","sessionId":"hook-monitor","cwd":"/Users/wjs/work/pyproj/AgentHalo","source":"claude-hook"}"#.utf8).write(to: statusFile)
-    _ = monitor.refresh(now: now.addingTimeInterval(2))
-    expect(monitor.snapshots().isEmpty, true, "truncated partial hook line should not produce a snapshot")
-}
-
-func testClaudeMonitorIgnoresSubagentTranscripts() throws {
-    let root = URL(fileURLWithPath: NSTemporaryDirectory())
-        .appendingPathComponent("agent-halo-claude-subagents-\(UUID().uuidString)", isDirectory: true)
-    defer {
-        try? FileManager.default.removeItem(at: root)
-    }
-    let projects = root.appendingPathComponent("projects", isDirectory: true)
-    let project = projects.appendingPathComponent("-Users-wjs-work-pyproj-AgentHalo", isDirectory: true)
-    let subagents = project
-        .appendingPathComponent("parent-session", isDirectory: true)
-        .appendingPathComponent("subagents", isDirectory: true)
-    try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
-    try FileManager.default.createDirectory(at: subagents, withIntermediateDirectories: true)
-    let mainFile = project.appendingPathComponent("\(UUID().uuidString).jsonl")
-    let subagentFile = subagents.appendingPathComponent("agent-active.jsonl")
-    let now = ISO8601DateFormatter().date(from: "2026-06-13T02:00:00Z")!
-    let mainTranscript = [
-        #"{"type":"user","message":{"role":"user","content":"Build Claude status"},"timestamp":"2026-06-13T02:00:00Z","cwd":"/Users/wjs/work/pyproj/AgentHalo","sessionId":"claude-main"}"#,
-        #"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Done"}]},"timestamp":"2026-06-13T02:00:01Z","cwd":"/Users/wjs/work/pyproj/AgentHalo","sessionId":"claude-main"}"#,
-        #"{"type":"system","subtype":"turn_duration","durationMs":1000,"timestamp":"2026-06-13T02:00:02Z","cwd":"/Users/wjs/work/pyproj/AgentHalo","sessionId":"claude-main"}"#
-    ].joined(separator: "\n") + "\n"
-    let subagentTranscript = [
-        #"{"type":"user","isSidechain":true,"message":{"role":"user","content":"subtask"},"timestamp":"2026-06-13T02:00:03Z","cwd":"/Users/wjs/work/pyproj/AgentHalo","sessionId":"claude-subagent"}"#,
-        #"{"type":"assistant","isSidechain":true,"message":{"role":"assistant","content":[{"type":"text","text":"subtask result"}]},"timestamp":"2026-06-13T02:00:04Z","cwd":"/Users/wjs/work/pyproj/AgentHalo","sessionId":"claude-subagent"}"#
-    ].joined(separator: "\n") + "\n"
-    try Data(mainTranscript.utf8).write(to: mainFile)
-    try Data(subagentTranscript.utf8).write(to: subagentFile)
-
-    let monitor = ClaudeSessionMonitor(projectsRoot: projects)
-    _ = monitor.refresh(now: now.addingTimeInterval(5))
-
-    expect(monitor.snapshots().map(\.threadId), ["claude-main"], "Claude monitor should ignore subagent transcripts")
-    expect(monitor.snapshots().first?.state, .done, "main Claude transcript should still be visible as done")
-}
-
-func testClaudeStatusMergerPrefersHookDoneOverTranscriptThinking() {
-    let now = ISO8601DateFormatter().date(from: "2026-06-16T04:00:10Z")!
-    let hookDone = SessionSnapshot(
-        threadId: "same-thread",
-        projectName: "AgentHalo",
-        workingDirectory: "/Users/wjs/work/pyproj/AgentHalo",
-        state: .done,
-        action: "Complete",
-        lastEventAt: now.addingTimeInterval(-1),
-        completedAt: now.addingTimeInterval(-1),
-        active: false,
-        agent: .claudeCode
-    )
-    let transcriptThinking = SessionSnapshot(
-        threadId: "same-thread",
-        projectName: "AgentHalo",
-        workingDirectory: "/Users/wjs/work/pyproj/AgentHalo",
-        state: .thinking,
-        action: "Thinking",
-        lastEventAt: now,
-        completedAt: nil,
-        active: true,
-        agent: .claudeCode
-    )
-
-    let merged = ClaudeStatusSourceMerger.merge(
-        hookSnapshots: [hookDone],
-        transcriptSnapshots: [transcriptThinking],
         now: now
     )
-
-    expect(merged.map(\.state), [.done], "recent hook completion should suppress transcript reactivation")
-}
-
-func testClaudeStatusMergerFallsBackToTranscriptWhenNoHookSnapshotExists() {
-    let now = ISO8601DateFormatter().date(from: "2026-06-16T04:00:10Z")!
-    let transcriptThinking = SessionSnapshot(
-        threadId: "transcript-only",
-        projectName: "AgentHalo",
-        workingDirectory: "/Users/wjs/work/pyproj/AgentHalo",
-        state: .thinking,
-        action: "Thinking",
-        lastEventAt: now,
-        completedAt: nil,
-        active: true,
-        agent: .claudeCode
-    )
-
-    let merged = ClaudeStatusSourceMerger.merge(
-        hookSnapshots: [],
-        transcriptSnapshots: [transcriptThinking],
-        now: now
-    )
-
-    expect(merged.map(\.threadId), ["transcript-only"], "transcript should drive Claude status only when hook data is unavailable")
-}
-
-func testClaudeTranscriptReducerHandlesMultipleItemsAttentionAndErrors() {
-    let now = ISO8601DateFormatter().date(from: "2026-06-16T04:00:00Z")!
-    var reducer = ClaudeSessionReducer(filePath: "/tmp/transcript-parity.jsonl", now: now)
-
-    reducer.consume(jsonLine: #"{"type":"user","timestamp":"2026-06-16T04:00:00Z","sessionId":"transcript-parity","message":{"content":"work"}}"#, now: now)
-    reducer.consume(jsonLine: #"{"type":"assistant","timestamp":"2026-06-16T04:00:01Z","sessionId":"transcript-parity","message":{"content":[{"type":"text","text":"checking"},{"type":"tool_use","name":"Bash"},{"type":"tool_use","name":"Read"}]}}"#, now: now.addingTimeInterval(1))
-    expect(reducer.snapshot.state, .working, "tool_use should be found beyond the first transcript content item")
-    expect(reducer.snapshot.action, "Running command", "first tool action should be localized through the shared spec")
-
-    reducer.consume(jsonLine: #"{"type":"assistant","timestamp":"2026-06-16T04:00:02Z","sessionId":"transcript-parity","message":{"content":[{"type":"text","text":"analysis continues"}]}}"#, now: now.addingTimeInterval(2))
-    expect(reducer.snapshot.state, .thinking, "assistant text should interrupt a stale working hold")
-
-    reducer.consume(jsonLine: #"{"type":"assistant","timestamp":"2026-06-16T04:00:03Z","sessionId":"transcript-parity","message":{"content":[{"type":"tool_use","name":"AskUserQuestion"}]}}"#, now: now.addingTimeInterval(3))
-    expect(reducer.snapshot.state, .attention, "AskUserQuestion should request attention")
-    expect(reducer.snapshot.action, "Awaiting permission", "AskUserQuestion action")
-
-    reducer.consume(jsonLine: #"{"type":"system","subtype":"api_error","timestamp":"2026-06-16T04:00:04Z","sessionId":"transcript-parity"}"#, now: now.addingTimeInterval(4))
-    expect(reducer.snapshot.state, .error, "api_error should become an error state")
-    expect(reducer.snapshot.action, "Service unavailable", "api_error action")
-    expect(reducer.snapshot.active, false, "api_error should deactivate the session")
-}
-
-func testClaudeLiveSessionReaderRequiresLiveWaitingProcess() throws {
-    let home = URL(fileURLWithPath: NSTemporaryDirectory())
-        .appendingPathComponent("agent-halo-live-session-\(UUID().uuidString)", isDirectory: true)
-    defer { try? FileManager.default.removeItem(at: home) }
-    let sessions = home.appendingPathComponent(".claude/sessions", isDirectory: true)
-    try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
-    let file = sessions.appendingPathComponent("live.json")
-
-    try Data(#"{"status":"waiting","pid":99999999,"sessionId":"dead"}"#.utf8).write(to: file)
-    expect(ClaudeLiveSessionReader.hasStandbySession(homeDirectory: home), false, "dead Claude session pid should not show standby")
-
-    let live = #"{"status":"idle","pid":\#(ProcessInfo.processInfo.processIdentifier),"sessionId":"live","cwd":"/tmp/live-project","updatedAt":2000}"#
-    try Data(live.utf8).write(to: file)
-    expect(ClaudeLiveSessionReader.hasStandbySession(homeDirectory: home), true, "live idle Claude session should show standby")
-
-    let busyFile = sessions.appendingPathComponent("busy.json")
-    let busy = #"{"status":"busy","pid":\#(ProcessInfo.processInfo.processIdentifier),"sessionId":"busy","cwd":"/tmp/busy-project","updatedAt":4000}"#
-    try Data(busy.utf8).write(to: busyFile)
-    expect(
-        ClaudeLiveSessionReader.liveSessions(homeDirectory: home).contains { $0.sessionId == "busy" },
-        true,
-        "a live busy Claude session should be available for metadata retention"
-    )
-    // PR #10: Claude Code keeps `status` at "busy" mid-turn, so standby
-    // detection no longer filters on waiting/idle — a live pid is enough.
-    expect(
-        ClaudeLiveSessionReader.standbySessions(homeDirectory: home).contains { $0.sessionId == "busy" },
-        true,
-        "a live busy Claude session should be classified as standby"
-    )
-
-    let newerFile = sessions.appendingPathComponent("newer.json")
-    let newer = #"{"status":"waiting","pid":\#(ProcessInfo.processInfo.processIdentifier),"sessionId":"newer","cwd":"/tmp/newer-project","updatedAt":3000}"#
-    try Data(newer.utf8).write(to: newerFile)
-    let standbySessions = ClaudeLiveSessionReader.standbySessions(homeDirectory: home)
-    expect(standbySessions.count, 3, "all live Claude sessions should be returned as standby")
-    expect(
-        ClaudeLiveSessionReader.preferredStandbySession(
-            sessions: standbySessions,
-            hookSnapshots: []
-        )?.sessionId,
-        "busy",
-        "most recently updated live session should win without hook evidence"
-    )
-
-    let recentHook = SessionSnapshot(
-        threadId: "live",
-        projectName: "live-project",
-        workingDirectory: "/tmp/live-project",
-        state: .done,
-        action: "Complete",
-        lastEventAt: Date(timeIntervalSince1970: 10),
-        completedAt: Date(timeIntervalSince1970: 10),
-        active: false,
-        agent: .claudeCode
-    )
-    expect(
-        ClaudeLiveSessionReader.preferredStandbySession(
-            sessions: standbySessions,
-            hookSnapshots: [recentHook]
-        )?.sessionId,
-        "live",
-        "recent matching hook activity should identify the visible standby session"
-    )
-}
-
-func testClaudeMainSessionDetailsResolverUsesExactSessionAndSafeLiveProject() {
-    let now = ISO8601DateFormatter().date(from: "2026-06-23T02:00:00Z")!
-    let main = SessionSnapshot(
-        threadId: "main-session",
-        projectName: "text-extract",
-        workingDirectory: "/Users/wjs/work/xisoft/text-extract",
-        state: .idle,
-        action: "Ready",
-        lastEventAt: now,
-        completedAt: nil,
-        active: false,
-        agent: .claudeCode
-    )
-    let live = ClaudeLiveSessionSnapshot(
-        sessionId: "main-session",
-        workingDirectory: "/Users/wjs/work/xisoft/text-extract",
-        processId: 1,
-        status: "idle",
-        updatedAt: now
-    )
-    let usage = ClaudeContextUsageSnapshot(
-        sessionId: "main-session",
-        usedPercent: 26.5,
-        modelName: "glm-latest",
-        inputTokens: 53_100,
-        outputTokens: 1_200,
-        updatedAt: now
-    )
-
-    let resolved = ClaudeMainSessionDetailsResolver.resolve(
-        mainSessionId: "main-session",
-        mainSessions: [main],
-        liveSession: live,
-        usage: usage
-    )
-    expect(resolved.sessionDetails.projectName, "text-extract", "main transcript project")
-    expect(resolved.sessionDetails.modelName, "glm-latest", "exact statusline model")
-    expect(resolved.sessionDetails.inputTokens, 53_100, "exact statusline input tokens")
-    expect(resolved.contextUsedPercent, 26.5, "exact statusline context")
-
-    let liveOnly = ClaudeMainSessionDetailsResolver.resolve(
-        mainSessionId: "main-session",
-        mainSessions: [],
-        liveSession: live,
-        usage: usage
-    )
-    expect(liveOnly.sessionDetails.projectName, "text-extract", "standby live session should retain a safe project")
-
-    var mismatched = usage
-    mismatched.sessionId = "other-session"
-    let rejected = ClaudeMainSessionDetailsResolver.resolve(
-        mainSessionId: "main-session",
-        mainSessions: [main],
-        liveSession: live,
-        usage: mismatched
-    )
-    expect(rejected.sessionDetails.modelName == nil, "another session model must be rejected")
-    expect(rejected.contextUsedPercent == nil, "another session context must be rejected")
-
-    let worktree = ClaudeLiveSessionSnapshot(
-        sessionId: "missing-main",
-        workingDirectory: "/Users/wjs/work/xisoft/text-extract/.claude/worktrees/agent-a47ee146bdd2ba852",
-        processId: 1,
-        status: "idle",
-        updatedAt: now
-    )
-    let unsafe = ClaudeMainSessionDetailsResolver.resolve(
-        mainSessionId: "missing-main",
-        mainSessions: [],
-        liveSession: worktree,
-        usage: nil
-    )
-    expect(unsafe.sessionDetails.projectName == nil, "agent worktree name must not become the project")
-}
-
-func testClaudeMainSessionDetailsResolverPrefersTranscriptSessionTitle() {
-    let now = ISO8601DateFormatter().date(from: "2026-06-29T03:00:00Z")!
-    var reducer = ClaudeSessionReducer(filePath: "/tmp/session-title.jsonl", now: now)
-    reducer.consume(jsonLine: #"{"type":"user","timestamp":"2026-06-29T03:00:00Z","cwd":"/Users/wjs/work/pyproj/AgentHalo","sessionId":"main-session","message":{"role":"user","content":"整理归档"}}"#, now: now)
-    reducer.consume(jsonLine: #"{"type":"ai-title","timestamp":"2026-06-29T03:00:01Z","cwd":"/Users/wjs/work/pyproj/AgentHalo","sessionId":"main-session","aiTitle":"整理归档 2026q3 测试"}"#, now: now.addingTimeInterval(1))
-
-    let usage = ClaudeContextUsageSnapshot(
-        sessionId: "main-session",
-        usedPercent: 26.5,
-        modelName: "claude-sonnet-4",
-        inputTokens: 12_000,
-        outputTokens: 900,
-        updatedAt: now
-    )
-    let resolved = ClaudeMainSessionDetailsResolver.resolve(
-        mainSessionId: "main-session",
-        mainSessions: [reducer.snapshot],
-        liveSession: nil,
-        usage: usage
-    )
-
-    expect(resolved.sessionDetails.projectName, "AgentHalo", "safe project name should remain the directory leaf")
-    expect(resolved.sessionDetails.sessionTitle, "整理归档 2026q3 测试", "Claude details should preserve transcript ai-title")
-}
-
-func testClaudeStatusMergerKeepsHookWhenTranscriptCompletionIsNewer() {
-    let now = ISO8601DateFormatter().date(from: "2026-06-16T04:00:10Z")!
-    let hookWorking = SessionSnapshot(
-        threadId: "same-thread",
-        projectName: "AgentHalo",
-        workingDirectory: "/Users/wjs/work/pyproj/AgentHalo",
-        state: .working,
-        action: "Running command",
-        lastEventAt: now.addingTimeInterval(-5),
-        completedAt: nil,
-        active: true,
-        agent: .claudeCode
-    )
-    let transcriptDone = SessionSnapshot(
-        threadId: "same-thread",
-        projectName: "AgentHalo",
-        workingDirectory: "/Users/wjs/work/pyproj/AgentHalo",
-        state: .done,
-        action: "Complete",
-        lastEventAt: now.addingTimeInterval(-1),
-        completedAt: now.addingTimeInterval(-1),
-        active: false,
-        agent: .claudeCode
-    )
-
-    let merged = ClaudeStatusSourceMerger.merge(
-        hookSnapshots: [hookWorking],
-        transcriptSnapshots: [transcriptDone],
-        now: now
-    )
-
-    expect(merged.map(\.state), [.working], "hook state should remain authoritative over transcript completion")
-}
-
-func testClaudeStatusMergerSurvivesDuplicateThreadIds() {
-    let now = ISO8601DateFormatter().date(from: "2026-06-16T04:00:10Z")!
-    let older = SessionSnapshot(
-        threadId: "dup",
-        projectName: "AgentHalo",
-        workingDirectory: "/tmp",
-        state: .working,
-        action: "Running command",
-        lastEventAt: now.addingTimeInterval(-10),
-        completedAt: nil,
-        active: true,
-        agent: .claudeCode
-    )
-    let newer = SessionSnapshot(
-        threadId: "dup",
-        projectName: "AgentHalo",
-        workingDirectory: "/tmp",
-        state: .thinking,
-        action: "Thinking",
-        lastEventAt: now,
-        completedAt: nil,
-        active: true,
-        agent: .claudeCode
-    )
-
-    // Two snapshots sharing the same threadId from a single source must NOT crash;
-    // the newer one (by lastEventAt) wins.
-    let merged = ClaudeStatusSourceMerger.merge(
-        hookSnapshots: [older, newer],
-        transcriptSnapshots: [],
-        now: now
-    )
-
-    expect(merged.count, 1, "duplicate threadIds collapse to one entry")
-    expect(merged.first?.state, .thinking, "duplicate-threadId merge keeps the newer snapshot")
-}
-
-func testClaudeHookStopShowsDoneThenReadyWhileWaitingForInput() {
-    let start = ISO8601DateFormatter().date(from: "2026-06-16T04:00:00Z")!
-    var reducer = ClaudeHookStatusReducer(threadId: "done-ready", now: start)
-    let settings = HaloSettings(
-        paused: false,
-        focusedAgent: .claudeCode,
-        installedAt: start.addingTimeInterval(-60)
-    )
-
-    reducer.consume(jsonLine: #"{"timestamp":"2026-06-16T04:00:00Z","event":"UserPromptSubmit","sessionId":"done-ready","cwd":"/Users/wjs/work/pyproj/AgentHalo","source":"claude-hook"}"#, now: start)
-    reducer.consume(jsonLine: #"{"timestamp":"2026-06-16T04:00:02Z","event":"Stop","sessionId":"done-ready","cwd":"/Users/wjs/work/pyproj/AgentHalo","source":"claude-hook"}"#, now: start.addingTimeInterval(2))
-
-    let fresh = SessionAggregator.aggregate(
-        snapshots: [reducer.snapshot],
-        settings: settings,
-        focusedAgent: .claudeCode,
-        now: start.addingTimeInterval(3)
-    )
-    expect(fresh.state, .done, "Claude Stop should show Done immediately")
-    expect(fresh.label, "COMPLETE", "Claude Stop label")
-
-    let settled = SessionAggregator.aggregate(
-        snapshots: [reducer.snapshot],
-        settings: settings,
-        focusedAgent: .claudeCode,
-        now: start.addingTimeInterval(11)
-    )
-    expect(settled.state, .idle, "Claude waiting for user input should settle to Offline")
-    expect(settled.label, "OFFLINE", "Claude settled label")
-    expect(settled.detail, "Claude Code is not running", "Claude waiting-for-input detail")
+    expect(planAggregate.state, .attention,
+           "Plan Mode attention should not expire with normal completion")
 }
 
 func testStartupExecutablePathUsesAppBundleRoot() {
@@ -2230,8 +1141,6 @@ func testStartupExecutablePathUsesAppBundleRoot() {
     let path = StartupLaunchAgent.executablePath(appBundleURL: bundleURL)
     expect(path, "/tmp/AgentHalo.app/Contents/MacOS/AgentHaloMac", "startup executable path")
 }
-
-// MARK: - Plan Mode 收尾保持等待用户确认
 
 func testPlanModePlainFinalAnswerDoesNotHoldAttentionAtTaskComplete() {
     var reducer = SessionReducer(filePath: "/tmp/session-019c6e27-e55b-73d1-87d8-4e01f1f75044.jsonl")
@@ -2396,236 +1305,6 @@ func testCompletionDoubleFlashMatchesWindowsCadence() {
     expect(HaloVisualModel.completionDoubleFlash(sinceState: 1.45) < 0.02, "completion flash should fade out")
 }
 
-func expectAlmost(_ actual: Double, _ expected: Double, tolerance: Double, _ message: String) {
-    if abs(actual - expected) > tolerance {
-        fatalError("\(message): expected \(expected) +/- \(tolerance), got \(actual)")
-    }
-}
-
-testReducesPlanningWorkingAttentionErrorAndCompleteEvents()
-testAggregatePrioritizesActionableSessions()
-testAggregateRemovesSupersededSessionErrors()
-testAcknowledgingCompletedSessionsStoresLatestVisibleCompletionOnly()
-testSettingsPersistFormalFieldsAndNormalizePaused()
-do {
-    try testSettingsDefaultsPreferredDisplayPlacementForLegacyFiles()
-    try testSettingsPersistPreferredDisplayPlacement()
-} catch {
-    fatalError("preferred display placement settings checks failed: \(error)")
-}
-testSettingsUsesDefaultHaloSizeForLegacyFilesAndClampsInvalidSizes()
-testSettingsMigratesLegacyAlwaysOnTopOffToDefaultOn()
-testSettingsPreservesExplicitAlwaysOnTopOffAfterMigrationVersion()
-do {
-    try testSettingsDefaultsFocusedAgentToCodexWhenMissing()
-} catch {
-    fatalError("\(error)")
-}
-testSettingsPersistsFocusedAgent()
-testAcknowledgedErrorVisibilityUsesLatestErrorTime()
-testWorkingVisibilityLiveCallOutputAndInitialTail()
-testSessionReducerCapturesCurrentCodexTurnDetailsAndRateLimitAvailability()
-testSessionReducerFallsBackToLastTokenUsageWithoutTotals()
-testSessionReducerCapturesOnlyExplicitCodexSessionTitles()
-do {
-    try testCodexSessionTitleReaderUsesLatestValidTitle()
-    try testCodexSessionMonitorPrefersIndexTitleAndKeepsMetadataFallback()
-} catch {
-    fatalError("Codex session title checks failed: \(error)")
-}
-testToolFailedDoesNotBecomeFatalError()
-do {
-    try testClaudeHookConfiguratorWritesUserSettingsNotLegacyClaudeJson()
-} catch {
-    fatalError("\(error)")
-}
-do {
-    try testClaudeStatusLineConfiguratorPreservesAndChainsExistingCommand()
-} catch {
-    fatalError("\(error)")
-}
-do {
-    try testMonitorHandlesPendingLinesAndTruncation()
-} catch {
-    fatalError("\(error)")
-}
-testAggregatorHidesAcknowledgedErrorsAndShowsStandbyInput()
-testFailureClassification()
-do {
-    try testRateLimitReaderFindsNewestTailRateLimit()
-} catch {
-    fatalError("\(error)")
-}
-do {
-    try testRateLimitReaderFindsContextUsageAndResetTimes()
-} catch {
-    fatalError("\(error)")
-}
-do {
-    try testRateLimitReaderCombinesSplitQuotaAndContextSnapshots()
-} catch {
-    fatalError("\(error)")
-}
-testRateLimitReaderReadsExplicitMonthlyQuota()
-testRateLimitReaderReadsFreeCreditsRemainingAsMonthlyQuota()
-testRateLimitReaderKeepsNewestCompletePlusBucketsOverOlderMonthlyUsage()
-testRateLimitReaderLeavesResetOnlyMonthlyQuotaPending()
-testRateLimitReaderReadsLongWindowPrimaryAsMonthly()
-testRateLimitReaderDoesNotTreatSecondaryBucketAsMonthly()
-testRateLimitReaderTreatsNullCreditsCodexCompatibilityAsPlus()
-testRateLimitReaderTreatsEmptyCodexCreditsCompatibilityAsPlus()
-testRateLimitReaderDoesNotTreatEmptyLegacyCreditsSecondaryAsMonthly()
-testRateLimitReaderDoesNotReturnEarlyOnContextOnlySnapshot()
-testClaudeStatusLineUsageParserReadsAuthoritativeContextPercent()
-do {
-    try testClaudeContextUsageReaderKeepsLastKnownUsageForMatchingSession()
-} catch {
-    fatalError("\(error)")
-}
-do {
-    try testClaudeContextUsageReaderDoesNotShareSnapshotsAcrossFiles()
-} catch {
-    fatalError("\(error)")
-}
-do {
-    try testClaudeContextUsageStorageSeparatesSessionsAndRejectsUnsafeIds()
-    try testClaudeContextUsageReaderRequiresExactFreshSession()
-    try testClaudeContextUsageReaderRetainsExactUsageWhileSessionIsLive()
-    try testClaudeContextUsageReaderMigratesMatchingLegacySnapshot()
-} catch {
-    fatalError("\(error)")
-}
-do {
-    try testClaudeStatusLineProxyRuntimeCapturesUsageAndForwardsInput()
-} catch {
-    fatalError("\(error)")
-}
-testCodexRealtimeActivityReaderDetectsAnswerStreaming()
-testCodexRealtimeActivityReaderDetectsContextCompactionStream()
-testCodexRealtimeActivityReaderDetectsArgumentStream()
-testCodexRealtimeActivityReaderEscalatedArgumentsAttention()
-testCodexRealtimeActivityReaderClearsAnswerStreamingWhenDone()
-testSessionReducerMapsCustomToolRequestUserInputToAttention()
-testSessionReducerMapsEscalatedExecCommandToAttention()
-testSessionReducerMapsApprovalNamedToolToAttention()
-testSessionReducerMapsEscalatedArgumentsStringToAttention()
-testCodexRealtimeActivityReaderDetectsRequestUserInput()
-testAggregatorInjectsUnacknowledgedCodexFailureWhenIdle()
-testAggregatorFiltersByFocusedAgent()
-testAggregatorIdleDetailUsesFocusedAgent()
-testAggregatorDoesNotInjectCodexFailureForClaudeFocus()
-testClaudeReducerDoesNotCompleteWithoutExplicitCompletionEvent()
-testAggregatorReturnsReadyAfterCompletedSessionSettles()
-testAggregatorKeepsCodexCompletionVisibleUntilAcknowledged()
-testClaudeReducerMapsTranscriptEvents()
-testClaudeReducerIgnoresLocalCommandUserRecords()
-testClaudeHookReducerMapsLifecycleEvents()
-testClaudeHookReducerPreservesThinkingBeforeQuickToolAndUsesShortResultHold()
-testClaudeHookReducerMapsBatchAndDirectPermissionEvents()
-testClaudeHookReducerPostToolUseFailureSurfacesThenSettles()
-testClaudeHookReducerPermissionPromptHoldsUntilResolved()
-testClaudeHookReducerIdlePromptReturnsToReady()
-testClaudeHookIdlePromptDoesNotDriveThinkingAggregate()
-testClaudeHookReducerStopFailureMapsToError()
-testClaudeHookReducerStuckPreToolUseRecoversAfterSafetyTimeout()
-testClaudeHookReducerManualCompactShowsDoneThenReady()
-testClaudeHookReducerActiveCompactRestoresThinking()
-testClaudeHookReducerIdleCompactTimeoutReturnsToReady()
-do {
-    try testClaudeHookMonitorPrunesStaleReducers()
-} catch {
-    fatalError("\(error)")
-}
-do {
-    try testClaudeMonitorHandlesDiscoveryPendingLinesAndTruncation()
-} catch {
-    fatalError("\(error)")
-}
-do {
-    try testClaudeHookMonitorHandlesPendingLinesAndTruncation()
-} catch {
-    fatalError("\(error)")
-}
-do {
-    try testClaudeMonitorIgnoresSubagentTranscripts()
-} catch {
-    fatalError("\(error)")
-}
-testClaudeStatusMergerPrefersHookDoneOverTranscriptThinking()
-testClaudeStatusMergerFallsBackToTranscriptWhenNoHookSnapshotExists()
-testClaudeStatusMergerKeepsHookWhenTranscriptCompletionIsNewer()
-testClaudeStatusMergerSurvivesDuplicateThreadIds()
-testClaudeTranscriptReducerHandlesMultipleItemsAttentionAndErrors()
-do {
-    try testClaudeLiveSessionReaderRequiresLiveWaitingProcess()
-} catch {
-    fatalError("\(error)")
-}
-testClaudeMainSessionDetailsResolverUsesExactSessionAndSafeLiveProject()
-testClaudeHookStopShowsDoneThenReadyWhileWaitingForInput()
-testStartupExecutablePathUsesAppBundleRoot()
-do {
-    try testDiagnosticsCreatesParentDirectoryForOutput()
-} catch {
-    fatalError("\(error)")
-}
-testHaloMathMatchesProgramConstants()
-testLinearSRGBMixAvoidsGammaLerp()
-testWindowsStyleVisualTransitionAndMaterial()
-testCompletionDoubleFlashMatchesWindowsCadence()
-testPlanModePlainFinalAnswerDoesNotHoldAttentionAtTaskComplete()
-testPlanModeProposedPlanFromTaskStartedHoldsAttentionAtTaskComplete()
-testPlanModeFromTurnContextHoldsAttentionAtTaskComplete()
-testPlanModeCompletedPlanItemHoldsAttentionAtTaskComplete()
-testNonPlanTaskCompleteStillTurnsGreen()
-testPlanModeWithoutFinalAnswerStillTurnsGreen()
-testPlanModeFlagResetsAfterFatalTurn()
-testAggregateFiltersInactiveAndTimedOutSessions()
-await runUsageModelChecks()
-print("PASS AgentHaloCore checks")
-
-func testClaudeReducerDoesNotCompleteWithoutExplicitCompletionEvent() {
-    let base = ISO8601DateFormatter().date(from: "2026-06-16T08:00:00Z")!
-    var reducer = ClaudeSessionReducer(filePath: "/test/session.jsonl", now: base, liveTracking: true)
-
-    let userMessage = """
-    {"type":"user","timestamp":"2026-06-16T08:00:01Z","message":{"role":"user","content":"check status"}}
-    """
-    reducer.consume(jsonLine: userMessage, now: base.addingTimeInterval(1))
-    expect(reducer.snapshot.active, true, "Should be active after user message")
-    expect(reducer.snapshot.state, .thinking, "Should be thinking")
-
-    reducer.applyWorkingVisibility(now: base.addingTimeInterval(6))
-    expect(reducer.snapshot.state, .thinking, "Should still be thinking after 5s (no assistant output yet)")
-    expect(reducer.snapshot.active, true, "Should still be active")
-
-    let toolUse = """
-    {"type":"assistant","timestamp":"2026-06-16T08:00:07Z","message":{"role":"assistant","content":[{"type":"tool_use","name":"Read"}]}}
-    """
-    reducer.consume(jsonLine: toolUse, now: base.addingTimeInterval(7))
-    expect(reducer.snapshot.state, .working, "Should be working after tool use")
-
-    let toolResult = """
-    {"type":"user","timestamp":"2026-06-16T08:00:08Z","message":{"role":"user","content":[{"type":"tool_result"}]}}
-    """
-    reducer.consume(jsonLine: toolResult, now: base.addingTimeInterval(8))
-
-    reducer.applyWorkingVisibility(now: base.addingTimeInterval(8.5))
-    expect(reducer.snapshot.state, .working, "Should extend working visibility")
-
-    reducer.applyWorkingVisibility(now: base.addingTimeInterval(10.0))
-    expect(reducer.snapshot.state, .thinking, "Should be thinking after working visibility expires")
-    expect(reducer.snapshot.active, true, "Should still be active")
-
-    reducer.applyWorkingVisibility(now: base.addingTimeInterval(12.0))
-    expect(reducer.snapshot.state, .thinking, "Should still be thinking (only 2s since thinking started)")
-
-    reducer.applyWorkingVisibility(now: base.addingTimeInterval(14.0))
-    expect(reducer.snapshot.state, .thinking, "Should not complete without an explicit Claude completion event")
-    expect(reducer.snapshot.active, true, "Should remain active without an explicit Claude completion event")
-    expect(reducer.snapshot.completedAt == nil, "Should not set completedAt without an explicit Claude completion event")
-}
-
 func testAggregateFiltersInactiveAndTimedOutSessions() {
     let now = Date()
     let activeSnap = SessionSnapshot(
@@ -2722,4 +1401,95 @@ func testAggregateFiltersInactiveAndTimedOutSessions() {
     )
     expect(failureAgg.state, .error, "should surface synthetic error when active session is filtered out")
     expect(failureAgg.detail, "额度已用尽", "should show correct failure detail")
+}
+
+func expectAlmost(_ actual: Double, _ expected: Double, tolerance: Double, _ message: String) {
+    if abs(actual - expected) > tolerance {
+        fatalError("\(message): expected \(expected) +/- \(tolerance), got \(actual)")
+    }
+}
+
+func testCodexOnlyAgentModelAndLegacyFocusMigration() throws {
+    expect(AgentKind.allCases, [.codex], "only Codex should be available")
+    let legacy = Data(
+        #"{"focusedAgent":"claudeCode","alwaysOnTop":true,"installedAt":"2026-01-01T00:00:00Z"}"#.utf8
+    )
+    let decoder = JSONDecoder()
+    decoder.dateDecodingStrategy = .iso8601
+    let settings = try decoder.decode(HaloSettings.self, from: legacy)
+    expect(settings.focusedAgent, .codex, "legacy focus should migrate to Codex")
+}
+
+func runCoreChecks() async throws {
+    testReducesPlanningWorkingAttentionErrorAndCompleteEvents()
+    testAggregatePrioritizesActionableSessions()
+    testAggregateRemovesSupersededSessionErrors()
+    testAcknowledgingCompletedSessionsStoresLatestVisibleCompletionOnly()
+    testSettingsPersistFormalFieldsAndNormalizePaused()
+    try testSettingsDefaultsPreferredDisplayPlacementForLegacyFiles()
+    try testSettingsPersistPreferredDisplayPlacement()
+    testSettingsUsesDefaultHaloSizeForLegacyFilesAndClampsInvalidSizes()
+    testSettingsMigratesLegacyAlwaysOnTopOffToDefaultOn()
+    testSettingsPreservesExplicitAlwaysOnTopOffAfterMigrationVersion()
+    try testSettingsDefaultsFocusedAgentToCodexWhenMissing()
+    testAcknowledgedErrorVisibilityUsesLatestErrorTime()
+    testWorkingVisibilityLiveCallOutputAndInitialTail()
+    testSessionReducerCapturesCurrentCodexTurnDetailsAndRateLimitAvailability()
+    testSessionReducerFallsBackToLastTokenUsageWithoutTotals()
+    testSessionReducerCapturesOnlyExplicitCodexSessionTitles()
+    try testCodexSessionTitleReaderUsesLatestValidTitle()
+    try testCodexSessionMonitorPrefersIndexTitleAndKeepsMetadataFallback()
+    testToolFailedDoesNotBecomeFatalError()
+    try testMonitorHandlesPendingLinesAndTruncation()
+    testAggregatorHidesAcknowledgedErrorsAndShowsStandbyInput()
+    testFailureClassification()
+    try testRateLimitReaderFindsNewestTailRateLimit()
+    try testRateLimitReaderFindsContextUsageAndResetTimes()
+    try testRateLimitReaderCombinesSplitQuotaAndContextSnapshots()
+    testRateLimitReaderReadsExplicitMonthlyQuota()
+    testRateLimitReaderReadsFreeCreditsRemainingAsMonthlyQuota()
+    testRateLimitReaderKeepsNewestCompletePlusBucketsOverOlderMonthlyUsage()
+    testRateLimitReaderLeavesResetOnlyMonthlyQuotaPending()
+    testRateLimitReaderReadsLongWindowPrimaryAsMonthly()
+    testRateLimitReaderDoesNotTreatSecondaryBucketAsMonthly()
+    testRateLimitReaderTreatsNullCreditsCodexCompatibilityAsPlus()
+    testRateLimitReaderTreatsEmptyCodexCreditsCompatibilityAsPlus()
+    testRateLimitReaderDoesNotTreatEmptyLegacyCreditsSecondaryAsMonthly()
+    testRateLimitReaderDoesNotReturnEarlyOnContextOnlySnapshot()
+    testCodexRealtimeActivityReaderDetectsAnswerStreaming()
+    testCodexRealtimeActivityReaderDetectsContextCompactionStream()
+    testCodexRealtimeActivityReaderDetectsArgumentStream()
+    testCodexRealtimeActivityReaderEscalatedArgumentsAttention()
+    testCodexRealtimeActivityReaderDetectsRequestUserInput()
+    testCodexRealtimeActivityReaderClearsAnswerStreamingWhenDone()
+    testSessionReducerMapsCustomToolRequestUserInputToAttention()
+    testSessionReducerMapsEscalatedExecCommandToAttention()
+    testSessionReducerMapsApprovalNamedToolToAttention()
+    testSessionReducerMapsEscalatedArgumentsStringToAttention()
+    testAggregatorInjectsUnacknowledgedCodexFailureWhenIdle()
+    testAggregatorLimitsCodexCompletionToFiveMinutesAndRequiresRunningApp()
+    testStartupExecutablePathUsesAppBundleRoot()
+    testPlanModePlainFinalAnswerDoesNotHoldAttentionAtTaskComplete()
+    testPlanModeProposedPlanFromTaskStartedHoldsAttentionAtTaskComplete()
+    testPlanModeFromTurnContextHoldsAttentionAtTaskComplete()
+    testPlanModeCompletedPlanItemHoldsAttentionAtTaskComplete()
+    testNonPlanTaskCompleteStillTurnsGreen()
+    testPlanModeWithoutFinalAnswerStillTurnsGreen()
+    testPlanModeFlagResetsAcrossTurns()
+    testPlanModeFlagResetsAfterFatalTurn()
+    try testDiagnosticsCreatesParentDirectoryForOutput()
+    testHaloMathMatchesProgramConstants()
+    testLinearSRGBMixAvoidsGammaLerp()
+    testWindowsStyleVisualTransitionAndMaterial()
+    testCompletionDoubleFlashMatchesWindowsCadence()
+    testAggregateFiltersInactiveAndTimedOutSessions()
+    try testCodexOnlyAgentModelAndLegacyFocusMigration()
+}
+
+do {
+    try await runCoreChecks()
+    try await runUsageModelChecks()
+    print("PASS AgentHaloCore Codex-only checks")
+} catch {
+    fatalError("AgentHaloCore checks failed: \(error)")
 }

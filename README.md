@@ -50,8 +50,8 @@ without requiring a dashboard or browser window.
 
 | Platform | Monitored agents | Notes |
 | --- | --- | --- |
-| Windows 10/11 | Codex only | Claude Code detection, polling, hooks, and UI switching are not included in the Windows build. |
-| macOS 13+ | Codex and the existing macOS Claude Code integration | The macOS behavior remains independent from the Windows simplification. |
+| Windows 10/11 | Codex only | Native WPF build. |
+| macOS 13+ | Codex only | Native Swift/AppKit build. |
 
 ## Install on Windows
 
@@ -85,19 +85,29 @@ Build the executable and release archive:
 powershell -ExecutionPolicy Bypass -File .\scripts\build-windows.ps1
 ```
 
-Run the local self-test:
+Run the local self-test, then remove its temporary report after confirming the
+result:
 
 ```powershell
-.\outputs\AgentHalo\AgentHalo.exe --self-test .\outputs\agenthalo-selftest.txt
-Get-Content .\outputs\agenthalo-selftest.txt
+$report = ".\outputs\agenthalo-selftest.txt"
+.\outputs\AgentHalo\AgentHalo.exe --self-test $report
+Get-Content $report
+Remove-Item -LiteralPath $report
 ```
 
 Expected result:
 
 ```text
 PASS
-Lifecycle, usage metrics, panel formatting, and animation checks passed.
+Lifecycle, topmost guard, usage metrics, panel formatting, and animation checks passed.
 ```
+
+### Windows release asset
+
+Upload only `outputs/AgentHalo-Windows-v*.zip`. The archive contains
+`AgentHalo.exe`, this README, and `SHA256.txt`; use the unpacked
+`outputs/AgentHalo/` directory only for local inspection. Generated outputs
+and self-test reports are excluded from source control.
 
 ### macOS
 
@@ -154,11 +164,15 @@ to visible Windows UI.
 | --- | --- |
 | Thinking | Amber asymmetric breathing |
 | Working | Blue asymmetric breathing |
-| Completed | Green double flash followed by slow breathing |
+| Completed | Green double flash followed by slow breathing for up to five minutes |
 | Attention | Coral double pulse |
 | Error | Red unseen/seen/acknowledged sequence |
 | Standby | Stable green |
 | Offline | Dim white |
+
+A completed state remains visible for at most five minutes while the Codex
+desktop process is running. Any new state replaces it immediately; when that
+process exits, Agent Halo switches to Offline.
 
 The shared lifecycle contract is documented in
 [`src/shared/README.md`](src/shared/README.md). Platform rendering behavior is

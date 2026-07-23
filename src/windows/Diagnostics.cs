@@ -655,6 +655,64 @@ public static class Diagnostics
                 Assert(!HaloWindow.DiagnosticIsFrameVisible(
                     new System.Drawing.Rectangle(4600, 1500, 112, 112), displayAreas),
                     "off-screen halo requires recovery");
+                DateTime topmostCheckUtc =
+                    new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+                Assert(TopmostGuardPolicy.CheckInterval == TimeSpan.FromSeconds(3),
+                    "topmost guard uses a low-frequency three-second interval");
+                Assert(TopmostGuardPolicy.IsDue(
+                    topmostCheckUtc, DateTime.MinValue),
+                    "topmost guard runs immediately before its first schedule");
+                DateTime nextTopmostCheckUtc =
+                    TopmostGuardPolicy.NextCheckUtc(topmostCheckUtc);
+                Assert(!TopmostGuardPolicy.IsDue(
+                    topmostCheckUtc.AddMilliseconds(2999), nextTopmostCheckUtc),
+                    "topmost guard remains throttled before three seconds");
+                Assert(TopmostGuardPolicy.IsDue(
+                    topmostCheckUtc.AddSeconds(3), nextTopmostCheckUtc),
+                    "topmost guard becomes due at three seconds");
+                Assert(!TopmostGuardPolicy.ShouldRestore(
+                    false, false, false, true, true),
+                    "disabled always-on-top never restores");
+                Assert(!TopmostGuardPolicy.ShouldRestore(
+                    true, true, false, true, true),
+                    "D3D full-screen activity suppresses restoration");
+                Assert(TopmostGuardPolicy.ShouldRestore(
+                    true, false, false, false, false),
+                    "missing native topmost state triggers restoration");
+                Assert(TopmostGuardPolicy.ShouldRestore(
+                    true, false, true, true, false),
+                    "foreground changes reassert the topmost order");
+                Assert(!TopmostGuardPolicy.ShouldRestore(
+                    true, false, true, false, false),
+                    "stable native topmost state avoids redundant work");
+                Assert(TopmostGuardPolicy.ShouldRestore(
+                    true, false, true, false, true),
+                    "forced lifecycle recovery reasserts topmost order");
+                DateTime nextRuntimeStateRefreshUtc =
+                    HaloWindow.NextRuntimeStateRefreshUtc(topmostCheckUtc);
+                Assert(!HaloWindow.IsRuntimeStateRefreshDue(
+                    topmostCheckUtc.AddMilliseconds(999),
+                    nextRuntimeStateRefreshUtc),
+                    "runtime-state refresh waits for its one-second interval");
+                Assert(!HaloWindow.ShouldRefreshRuntimeState(
+                    false, false, topmostCheckUtc.AddMilliseconds(999),
+                    nextRuntimeStateRefreshUtc),
+                    "unchanged foreground remains idle before runtime refresh is due");
+                Assert(HaloWindow.IsRuntimeStateRefreshDue(
+                    topmostCheckUtc.AddSeconds(1), nextRuntimeStateRefreshUtc),
+                    "runtime-state refresh is due after one second");
+                Assert(HaloWindow.ShouldRefreshRuntimeState(
+                    false, false, topmostCheckUtc.AddSeconds(1),
+                    nextRuntimeStateRefreshUtc),
+                    "completed-state expiry and process exit refresh without a foreground change");
+                Assert(CodexRuntimeReader.IsCodexDesktopProcessName("codex") &&
+                    CodexRuntimeReader.IsCodexDesktopProcessName("Codex"),
+                    "the Codex desktop executable is recognized case-insensitively");
+                Assert(!CodexRuntimeReader.IsCodexDesktopProcessName(
+                    "codex-code-mode-host") &&
+                    !CodexRuntimeReader.IsCodexDesktopProcessName(
+                    "codex-command-runner-0.145.0-alpha.30"),
+                    "Codex helper processes do not keep the desktop presence online");
                 MediaColor workingBlue = HaloVisual.StateColor(HaloState.Working);
                 MediaColor completedGreen = HaloVisual.StateColor(HaloState.Done);
                 Assert(ColorSaturation(workingBlue) >=
@@ -975,7 +1033,11 @@ public static class Diagnostics
                     return snapshot.ThreadId == "old-error";
                 }), "metadata-only Windows session does not suppress old error");
 
-                HaloSettings presenceSettings = new HaloSettings();
+                HaloSettings presenceSettings = new HaloSettings
+                {
+                    InstalledAt = supersessionNow.AddHours(-1).ToString("o",
+                        CultureInfo.InvariantCulture)
+                };
                 using (CodexSessionMonitor presenceMonitor = new CodexSessionMonitor())
                 {
                     AggregateSnapshot standby = presenceMonitor.GetAggregate(
@@ -985,12 +1047,17 @@ public static class Diagnostics
                         standby.TurnPhase == AgentTurnPhase.None &&
                         standby.Label == "STANDBY",
                         "running Codex without an active turn becomes normalized standby");
+                    Assert(HaloWindow.ShouldShowGreenStandby(standby, false),
+                        "standby aggregate selects the steady-green visual instead of completion breathing");
                     AggregateSnapshot offline = presenceMonitor.GetAggregate(
                         presenceSettings, false);
                     Assert(offline.State == HaloState.Idle &&
                         offline.Presence == AgentPresenceState.Offline &&
                         offline.TurnPhase == AgentTurnPhase.None,
                         "stopped Codex becomes normalized offline");
+                    Assert(!HaloWindow.ShouldShowGreenStandby(offline, false) &&
+                        !HaloWindow.ShouldShowGreenStandby(standby, true),
+                        "offline and preview aggregates cannot select the standby visual");
                 }
                 SessionSnapshot recentActive = new SessionSnapshot
                 {
@@ -1009,6 +1076,116 @@ public static class Diagnostics
                 Assert(!CodexSessionMonitor.IsSessionVisible(recentActive,
                     presenceSettings, true, supersessionNow),
                     "stale active session cannot leave the halo permanently working");
+
+                SessionSnapshot recentCompleted = new SessionSnapshot
+                {
+                    ThreadId = "recent-completed",
+                    State = HaloState.Done,
+                    Action = "Complete",
+                    LastEventUtc = supersessionNow.AddMinutes(-4).AddSeconds(-59),
+                    CompletedUtc = supersessionNow.AddMinutes(-4).AddSeconds(-59),
+                    Active = false,
+                    Agent = AgentKind.Codex
+                };
+                Assert(CodexSessionMonitor.IsSessionVisible(recentCompleted,
+                    presenceSettings, true, supersessionNow),
+                    "recent completion remains visible for five minutes while Codex runs");
+                recentCompleted.CompletedUtc = supersessionNow.AddMinutes(-5);
+                Assert(!CodexSessionMonitor.IsSessionVisible(recentCompleted,
+                    presenceSettings, true, supersessionNow),
+                    "completion expires exactly at five minutes");
+                recentCompleted.CompletedUtc = supersessionNow.AddMinutes(-4);
+                Assert(!CodexSessionMonitor.IsSessionVisible(recentCompleted,
+                    presenceSettings, false, supersessionNow),
+                    "completed session becomes offline immediately when Codex exits");
+                string completionFixtureRoot = Path.Combine(Path.GetTempPath(),
+                    "agent-halo-completion-fixture-" + Guid.NewGuid().ToString("N"));
+                Directory.CreateDirectory(completionFixtureRoot);
+                try
+                {
+                    DateTime recentCompletionUtc = supersessionNow.AddMinutes(-4).
+                        AddSeconds(-59);
+                    string recentFixture = Path.Combine(completionFixtureRoot,
+                        "recent-completion.jsonl");
+                    File.WriteAllText(recentFixture,
+                        "{\"timestamp\":\"" + recentCompletionUtc.AddSeconds(-1).
+                            ToString("o", CultureInfo.InvariantCulture) +
+                        "\",\"type\":\"session_meta\",\"payload\":{\"id\":\"recent-fixture\",\"cwd\":\"C:\\\\work\\\\fixture\"}}\n" +
+                        "{\"timestamp\":\"" + recentCompletionUtc.
+                            ToString("o", CultureInfo.InvariantCulture) +
+                        "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n" +
+                        "{\"timestamp\":\"" + recentCompletionUtc.
+                            ToString("o", CultureInfo.InvariantCulture) +
+                        "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\"}}\n",
+                        Encoding.UTF8);
+                    SessionTracker recentCompletionTracker =
+                        new SessionTracker(recentFixture);
+                    Assert(recentCompletionTracker.Snapshot.State == HaloState.Done &&
+                        recentCompletionTracker.Snapshot.CompletedUtc ==
+                            recentCompletionUtc,
+                        "JSONL task_complete records its completion timestamp");
+                    List<SessionSnapshot> parsedRecentCompletion =
+                        CodexSessionMonitor.SelectVisibleSessions(
+                            new[] { recentCompletionTracker.Snapshot },
+                            presenceSettings, true, supersessionNow);
+                    Assert(parsedRecentCompletion.Count == 1 &&
+                        parsedRecentCompletion[0].State == HaloState.Done,
+                        "parsed 4m59 completion reaches the visible completed state");
+                    Assert(CodexSessionMonitor.SelectVisibleSessions(
+                        new[] { recentCompletionTracker.Snapshot },
+                        presenceSettings, false, supersessionNow).Count == 0,
+                        "parsed completion is removed when the desktop process stops");
+
+                    DateTime expiredCompletionUtc = supersessionNow.AddMinutes(-5);
+                    string expiredFixture = Path.Combine(completionFixtureRoot,
+                        "expired-completion.jsonl");
+                    File.WriteAllText(expiredFixture,
+                        "{\"timestamp\":\"" + expiredCompletionUtc.AddSeconds(-1).
+                            ToString("o", CultureInfo.InvariantCulture) +
+                        "\",\"type\":\"session_meta\",\"payload\":{\"id\":\"expired-fixture\",\"cwd\":\"C:\\\\work\\\\fixture\"}}\n" +
+                        "{\"timestamp\":\"" + expiredCompletionUtc.
+                            ToString("o", CultureInfo.InvariantCulture) +
+                        "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n" +
+                        "{\"timestamp\":\"" + expiredCompletionUtc.
+                            ToString("o", CultureInfo.InvariantCulture) +
+                        "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\"}}\n",
+                        Encoding.UTF8);
+                    SessionTracker expiredCompletionTracker =
+                        new SessionTracker(expiredFixture);
+                    Assert(expiredCompletionTracker.Snapshot.State == HaloState.Done &&
+                        CodexSessionMonitor.SelectVisibleSessions(
+                            new[] { expiredCompletionTracker.Snapshot },
+                            presenceSettings, true, supersessionNow).Count == 0,
+                        "parsed completion expires exactly at five minutes into standby selection");
+                }
+                finally
+                {
+                    if (Directory.Exists(completionFixtureRoot))
+                    {
+                        Directory.Delete(completionFixtureRoot, true);
+                    }
+                }
+                foreach (HaloState replacementState in new[] {
+                    HaloState.Thinking, HaloState.Working, HaloState.Attention,
+                    HaloState.Error })
+                {
+                    SessionSnapshot replacement = new SessionSnapshot
+                    {
+                        ThreadId = "replacement-" + replacementState.ToString(),
+                        State = replacementState,
+                        Active = replacementState != HaloState.Error,
+                        LastEventUtc = supersessionNow,
+                        Agent = AgentKind.Codex
+                    };
+                    List<SessionSnapshot> prioritized =
+                        CodexSessionMonitor.SelectVisibleSessions(
+                            new[] { recentCompleted, replacement },
+                            presenceSettings, true, supersessionNow);
+                    Assert(prioritized.Count == 2 &&
+                        prioritized[0].State == replacementState,
+                        "new " + replacementState.ToString() +
+                        " state takes precedence over a recent completion");
+                }
 
                 string watcherRoot = Path.Combine(Path.GetTempPath(),
                     "agent-halo-session-watch-" + Guid.NewGuid().ToString("N"));
@@ -1045,7 +1222,7 @@ public static class Diagnostics
 
                 File.Delete(temp);
                 File.WriteAllText(outputPath,
-                    "PASS\nLifecycle, usage metrics, panel formatting, and animation checks passed.\n",
+                    "PASS\nLifecycle, topmost guard, usage metrics, panel formatting, and animation checks passed.\n",
                     Encoding.UTF8);
                 return 0;
             }

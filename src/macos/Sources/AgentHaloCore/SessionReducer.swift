@@ -1,6 +1,7 @@
 import Foundation
 
 public struct SessionReducer: Sendable {
+    private static let workingVisibilityExtension: TimeInterval = 1.8
     public private(set) var snapshot: SessionSnapshot
     private var inFlightTools = 0
     private var workingVisibleUntil: Date?
@@ -213,7 +214,7 @@ public struct SessionReducer: Sendable {
                 if inFlightTools > 0 {
                     snapshot.state = .working
                 } else if liveTracking {
-                    extendWorkingVisibility(seconds: ClaudeContextUsageConstants.workingVisibilityExtension, now: now)
+                    extendWorkingVisibility(seconds: Self.workingVisibilityExtension, now: now)
                     snapshot.state = .working
                     snapshot.action = "Reviewing result"
                 } else {

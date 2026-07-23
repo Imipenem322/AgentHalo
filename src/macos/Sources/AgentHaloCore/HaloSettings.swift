@@ -91,7 +91,9 @@ public struct HaloSettings: Codable, Equatable, Sendable {
             forKey: .alwaysOnTopBehaviorVersion
         ) ?? 0
         self.paused = try container.decodeIfPresent(Bool.self, forKey: .paused) ?? false
-        self.focusedAgent = try container.decodeIfPresent(AgentKind.self, forKey: .focusedAgent) ?? .codex
+        // Older settings may contain "claudeCode". The Codex-only app
+        // intentionally migrates every saved focus value back to Codex.
+        self.focusedAgent = .codex
         self.installedAt = try container.decodeIfPresent(Date.self, forKey: .installedAt) ?? Date()
         self.acknowledged = try container.decodeIfPresent([String: Date].self, forKey: .acknowledged) ?? [:]
         self.acknowledgedErrorAt = try container.decodeIfPresent(Date.self, forKey: .acknowledgedErrorAt)

@@ -122,10 +122,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var settings: HaloSettings
     private let codexActivityMonitor = CodexActivityMonitor()
     private var codexActivitySnapshot = CodexActivitySnapshot.empty
-    private let claudeActivityMonitor = ClaudeActivityMonitor()
-    private var claudeActivitySnapshot = ClaudeActivitySnapshot.empty
-    private var nextStatusLineReconciliationAt = Date.distantPast
-    private let statusLineReconciliationInterval: TimeInterval = 2
     private var selectedPreview = PreviewPayload.live
     private var aggregate: AggregateSnapshot
     private var statusItem: NSStatusItem!
@@ -143,11 +139,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var usageRequestTasks: [UsageProviderID: UsageRequestRecord] = [:]
     private let usageRefreshInterval: TimeInterval = 5 * 60
     private var usageTerminationHandshake = UsageTerminationHandshake()
-    private let claudeContextUsageReader = ClaudeContextUsageReader()
-    private let contextReaderQueue = DispatchQueue(
-        label: "com.agenthalo.context-reader",
-        qos: .userInteractive
-    )
     private let instanceLock = InstanceLock()
     private let codexActivator: @MainActor () -> Void
     private var liveErrorPresentationState = LiveErrorPresentationState()
@@ -186,8 +177,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSApp.terminate(nil)
             return
         }
-        ClaudeHookConfigurator.configure()
-        ClaudeStatusLineConfigurator.configure()
         NSApp.setActivationPolicy(.accessory)
         createStatusItem()
         createHaloPanel()
@@ -200,17 +189,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.codexActivityDidChange(snapshot)
             }
         }
-        claudeActivitySnapshot = claudeActivityMonitor.snapshot()
-        claudeActivityMonitor.start { [weak self] snapshot in
-            Task { @MainActor in
-                self?.claudeActivityDidChange(snapshot)
-            }
-        }
         // Initialize L10n with user's saved preference
         L10n.shared.setLanguage(settings.language)
         currentLanguage = L10n.shared.currentLanguage
         startUsageRefreshLoop()
-        requestUsageRefresh(for: Self.usageProviderID(for: settings.focusedAgent))
+        requestUsageRefresh(for: .codex)
 
         // Observe language changes
         languageObserver = NotificationCenter.default.addObserver(
@@ -258,7 +241,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         cancelLocalUsageTasks()
         codexActivityMonitor.stop()
-        claudeActivityMonitor.stop()
         NSWorkspace.shared.notificationCenter.removeObserver(self)
         settingsSaveTimer?.invalidate()
         if placementState.shouldPersistCurrentFrame, let panel {
@@ -287,28 +269,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         let now = Date()
-        reconcileClaudeStatusLineConfiguration(now: now)
         acknowledgeCompletedIfCodexIsForeground()
         let codexRunning = CodexAppDetector.isCodexRunning()
         codexActivityMonitor.updatePollingContext(
-            focusedAgent: settings.focusedAgent,
+            focusedAgent: .codex,
             codexRunning: codexRunning
         )
-        claudeActivityMonitor.updatePollingContext(
-            focusedAgent: settings.focusedAgent,
-            detailsPanelVisible: detailsPanel.isVisible
-        )
         refreshAggregateAndUI(now: now, codexRunning: codexRunning)
-    }
-
-    private func claudeActivityDidChange(_ snapshot: ClaudeActivitySnapshot) {
-        guard haloView?.isDragging != true else {
-            claudeActivitySnapshot = snapshot
-            return
-        }
-        claudeActivitySnapshot = snapshot
-        let codexRunning = CodexAppDetector.isCodexRunning()
-        refreshAggregateAndUI(now: Date(), codexRunning: codexRunning)
     }
 
     private func codexActivityDidChange(_ snapshot: CodexActivitySnapshot) {
@@ -319,7 +286,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         codexActivitySnapshot = snapshot
         let codexRunning = CodexAppDetector.isCodexRunning()
         codexActivityMonitor.updatePollingContext(
-            focusedAgent: settings.focusedAgent,
+            focusedAgent: .codex,
             codexRunning: codexRunning
         )
         refreshAggregateAndUI(now: Date(), codexRunning: codexRunning)
@@ -331,13 +298,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             settings: settings,
             recentFailure: codexActivitySnapshot.recentFailure,
             codexRunning: codexRunning,
-            focusedAgent: settings.focusedAgent
+            focusedAgent: .codex
         )
         aggregate = Self.standbyAggregate(
             aggregate: aggregate,
-            hasLiveSession: settings.focusedAgent == .codex
-                ? codexRunning
-                : claudeActivitySnapshot.preferredStandbySession != nil
+            hasLiveSession: codexRunning
         )
         applyRealtimeCodexActivity(codexActivitySnapshot.realtimeActivity)
         let errorUpdate = liveErrorPresentationState.update(
@@ -355,13 +320,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 settings: settings,
                 recentFailure: codexActivitySnapshot.recentFailure,
                 codexRunning: codexRunning,
-                focusedAgent: settings.focusedAgent
+                focusedAgent: .codex
             )
             aggregate = Self.standbyAggregate(
                 aggregate: aggregate,
-                hasLiveSession: settings.focusedAgent == .codex
-                    ? codexRunning
-                    : claudeActivitySnapshot.preferredStandbySession != nil
+                hasLiveSession: codexRunning
             )
             applyRealtimeCodexActivity(codexActivitySnapshot.realtimeActivity)
         }
@@ -379,13 +342,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         statusItem.button?.image = StatusIcon.image(color: NSColor.systemTeal)
         statusItem.button?.toolTip = "Agent Halo"
-    }
-
-    private func reconcileClaudeStatusLineConfiguration(now: Date) {
-        guard now >= nextStatusLineReconciliationAt else { return }
-        nextStatusLineReconciliationAt = now.addingTimeInterval(statusLineReconciliationInterval)
-        guard !ClaudeStatusLineConfigurator.isConfigured() else { return }
-        ClaudeStatusLineConfigurator.configure()
     }
 
     private func createHaloPanel() {
@@ -570,12 +526,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         addCheckItem(L10n.shared["menu.launch_at_startup"], checked: currentStartupEnabled(), action: #selector(toggleStartup), to: menu)
         addCheckItem(L10n.shared["menu.pause_monitor"], checked: settings.paused, action: #selector(togglePause), to: menu)
         addHaloSizeItem(to: menu)
-        let focus = NSMenuItem(title: L10n.shared["menu.focus_target"], action: nil, keyEquivalent: "")
-        let focusMenu = NSMenu()
-        addFocusedAgentItem(.codex, to: focusMenu)
-        addFocusedAgentItem(.claudeCode, to: focusMenu)
-        focus.submenu = focusMenu
-        menu.addItem(focus)
 
         // Language submenu
         let languageItem = NSMenuItem(title: L10n.shared["menu.language"], action: nil, keyEquivalent: "")
@@ -669,32 +619,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func bringCodexForward() {
-        guard settings.focusedAgent == .codex else {
-            return
-        }
         codexActivator()
     }
 
     func handleHaloPrimaryClick() {
         // Keep single-click non-activating. Double-click remains the explicit
         // path for bringing Codex forward.
-    }
-
-    func setFocusedAgent(_ agent: AgentKind) {
-        guard settings.focusedAgent != agent else {
-            tick()
-            refreshVisibleDetailsPanel()
-            requestUsageRefresh(for: Self.usageProviderID(for: agent))
-            return
-        }
-        settings.focusedAgent = agent
-        settingsStore.save(settings)
-        if agent == .claudeCode {
-            claudeActivityMonitor.requestRefresh()
-        }
-        tick()
-        refreshVisibleDetailsPanel()
-        requestUsageRefresh(for: Self.usageProviderID(for: agent))
     }
 
     @objc private func quit() {
@@ -795,9 +725,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func acknowledgeCompletedIfCodexIsForeground() {
-        guard settings.focusedAgent == .codex else {
-            return
-        }
         let updated = settings.acknowledgingCompletedSessions(
             codexIsForeground ? codexSnapshots() : []
         )
@@ -809,10 +736,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func codexSnapshots() -> [SessionSnapshot] {
         codexActivitySnapshot.sessions
-    }
-
-    private func claudeSnapshots() -> [SessionSnapshot] {
-        claudeActivitySnapshot.mergedClaudeSnapshots
     }
 
     static func standbyAggregate(
@@ -833,141 +756,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
     }
 
-    private func acknowledgeCompletedSessions(_ sessions: [SessionSnapshot]) {
-        let updated = settings.acknowledgingCompletedSessions(sessions)
-        if updated.acknowledged != settings.acknowledged {
-            settings = updated
-            settingsStore.save(settings)
-            aggregate = SessionAggregator.aggregate(
-                snapshots: allSnapshots(),
-                settings: settings,
-                recentFailure: codexActivitySnapshot.recentFailure,
-                codexRunning: CodexAppDetector.isCodexRunning(),
-                focusedAgent: settings.focusedAgent
-            )
-            applyRealtimeCodexActivity(codexActivitySnapshot.realtimeActivity)
-        }
-    }
-
     private func showDetails() {
         guard !systemOverlaySuspended else {
             return
         }
         hoverHideTimer?.invalidate()
-        let rawClaudeSnapshots = settings.focusedAgent == .claudeCode ? claudeSnapshots() : []
-        if settings.focusedAgent == .claudeCode {
-            acknowledgeCompletedSessions(rawClaudeSnapshots)
-        }
-        updateDetailsPanelContent(rawClaudeSnapshots: rawClaudeSnapshots)
+        updateDetailsPanelContent()
         detailsPanel.onMouseEntered = { [weak self] in
             self?.hoverHideTimer?.invalidate()
         }
         detailsPanel.onMouseExited = { [weak self] in
             self?.scheduleHideDetails()
         }
-        detailsPanel.onAgentSelected = { [weak self] agent in
-            self?.setFocusedAgent(agent)
-        }
         positionDetailsPanel()
         detailsPanel.orderFrontRegardless()
-        requestUsageRefresh(for: Self.usageProviderID(for: settings.focusedAgent))
+        requestUsageRefresh(for: .codex)
     }
 
-    private func updateDetailsPanelContent(rawClaudeSnapshots: [SessionSnapshot]? = nil) {
-        let rawClaudeSnapshots = rawClaudeSnapshots
-            ?? (settings.focusedAgent == .claudeCode ? claudeSnapshots() : [])
+    private func updateDetailsPanelContent() {
         let displayedAggregate = displayAggregate()
-        let providerID = Self.usageProviderID(for: settings.focusedAgent)
+        let providerID = UsageProviderID.codex
         let monitorState = usageStates[providerID]
             ?? UsageMonitorState(providerID: providerID, accessMode: .apiKey)
-        let claudeMainSessionId = settings.focusedAgent == .claudeCode
-            ? Self.claudeMainSessionIdForDetails(
-                displayedAggregate: displayedAggregate,
-                rawClaudeSnapshots: rawClaudeSnapshots,
-                liveSession: claudeActivitySnapshot.preferredStandbySession
-            )
-            : nil
-        let claudeUsageFreshness = Self.claudeUsageFreshness(
-            mainSessionId: claudeMainSessionId,
-            liveSessions: claudeActivitySnapshot.liveSessions
+        let session = displayedAggregate.sessions.first
+        let exactSessionDetails = SessionDetailsSnapshot(
+            projectName: session?.projectName,
+            sessionTitle: session?.sessionTitle,
+            modelName: session?.modelName,
+            inputTokens: session?.inputTokens,
+            outputTokens: session?.outputTokens
         )
-        let claudeUsage = claudeMainSessionId.flatMap { sessionId in
-            contextReaderQueue.sync {
-                claudeContextUsageReader.read(
-                    sessionId: sessionId,
-                    freshness: claudeUsageFreshness
-                )
-            }
-        }
-        let exactSessionDetails: SessionDetailsSnapshot
-        let exactContextUsedPercent: Double?
-        switch settings.focusedAgent {
-        case .codex:
-            let session = displayedAggregate.sessions.first
-            exactSessionDetails = SessionDetailsSnapshot(
-                projectName: session?.projectName,
-                sessionTitle: session?.sessionTitle,
-                modelName: session?.modelName,
-                inputTokens: session?.inputTokens,
-                outputTokens: session?.outputTokens
-            )
-            exactContextUsedPercent = session?.contextUsedPercent
-        case .claudeCode:
-            let resolved = ClaudeMainSessionDetailsResolver.resolve(
-                mainSessionId: claudeMainSessionId,
-                mainSessions: claudeActivitySnapshot.transcriptSnapshots,
-                liveSession: claudeActivitySnapshot.preferredStandbySession,
-                usage: claudeUsage
-            )
-            exactSessionDetails = resolved.sessionDetails
-            exactContextUsedPercent = resolved.contextUsedPercent
-        }
         let model = DetailsContentResolver.resolve(
             providerID: providerID,
             monitorState: monitorState,
             isOffline: displayedAggregate.state == .idle && displayedAggregate.label == "OFFLINE",
             sessionDetails: exactSessionDetails,
-            contextUsedPercent: exactContextUsedPercent,
+            contextUsedPercent: session?.contextUsedPercent,
             now: Date()
         )
         detailsPanel.render(aggregate: displayedAggregate, model: model)
-    }
-
-    static func claudeMainSessionIdForDetails(
-        displayedAggregate: AggregateSnapshot,
-        rawClaudeSnapshots: [SessionSnapshot],
-        liveSession: ClaudeLiveSessionSnapshot?
-    ) -> String? {
-        if let displayed = displayedAggregate.sessions.first(where: { $0.threadId != "claude-code" }) {
-            return displayed.threadId
-        }
-        if let liveSession {
-            return liveSession.sessionId
-        }
-        return rawClaudeSnapshots
-            .filter { $0.threadId != "claude-code" }
-            .max { $0.lastEventAt < $1.lastEventAt }?
-            .threadId
-    }
-
-    static func claudeUsageFreshness(
-        mainSessionId: String?,
-        liveSessions: [ClaudeLiveSessionSnapshot]
-    ) -> ClaudeContextUsageFreshness {
-        guard let mainSessionId,
-              liveSessions.contains(where: { $0.sessionId == mainSessionId }) else {
-            return .recentOnly
-        }
-        return .whileSessionIsLive
-    }
-
-    static func usageProviderID(for agent: AgentKind) -> UsageProviderID {
-        switch agent {
-        case .codex:
-            return .codex
-        case .claudeCode:
-            return .claude
-        }
     }
 
     private func startUsageRefreshLoop() {
@@ -983,7 +810,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 guard let self, !Task.isCancelled else {
                     return
                 }
-                requestUsageRefresh(for: Self.usageProviderID(for: settings.focusedAgent))
+                requestUsageRefresh(for: .codex)
             }
         }
     }
@@ -1016,7 +843,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func publishUsageState(_ state: UsageMonitorState, for providerID: UsageProviderID) {
         usageStates[providerID] = state
-        guard providerID == Self.usageProviderID(for: settings.focusedAgent),
+        guard providerID == .codex,
               detailsPanel.isVisible else {
             return
         }
@@ -1137,7 +964,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func allSnapshots() -> [SessionSnapshot] {
-        codexActivitySnapshot.sessions + claudeSnapshots()
+        codexActivitySnapshot.sessions
     }
 
     private func addMenuItem(_ title: String, _ action: Selector, enabled: Bool, to menu: NSMenu) {
@@ -1204,22 +1031,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         item.representedObject = payload
         item.state = payload == selectedPreview ? .on : .off
         menu.addItem(item)
-    }
-
-    private func addFocusedAgentItem(_ agent: AgentKind, to menu: NSMenu) {
-        let item = NSMenuItem(title: agent.menuTitle, action: #selector(selectFocusedAgent(_:)), keyEquivalent: "")
-        item.target = self
-        item.representedObject = agent.rawValue
-        item.state = settings.focusedAgent == agent ? .on : .off
-        menu.addItem(item)
-    }
-
-    @objc private func selectFocusedAgent(_ sender: NSMenuItem) {
-        guard let rawValue = sender.representedObject as? String,
-              let agent = AgentKind(rawValue: rawValue) else {
-            return
-        }
-        setFocusedAgent(agent)
     }
 
     private func addLanguageItem(_ lang: String?, to menu: NSMenu) {

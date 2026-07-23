@@ -2,48 +2,29 @@ import Foundation
 
 public enum AgentKind: String, Codable, CaseIterable, Equatable, Sendable {
     case codex
-    case claudeCode
 
     public var menuTitle: String {
-        switch self {
-        case .codex: return "Codex"
-        case .claudeCode: return "Claude Code"
-        }
+        "Codex"
     }
 
     public var segmentedTitle: String {
-        switch self {
-        case .codex: return "Codex"
-        case .claudeCode: return "CC"
-        }
+        "Codex"
     }
 
     public var standbyDetail: String {
-        switch self {
-        case .codex: return "Codex is standing by"
-        case .claudeCode: return "Claude Code is standing by"
-        }
+        "Codex is standing by"
     }
 
     public var localizedStandbyDetail: String {
-        switch self {
-        case .codex: return L10n.shared["status.standby_codex"]
-        case .claudeCode: return L10n.shared["status.standby_claude"]
-        }
+        L10n.shared["status.standby_codex"]
     }
 
     public var offlineDetail: String {
-        switch self {
-        case .codex: return "Codex is not running"
-        case .claudeCode: return "Claude Code is not running"
-        }
+        "Codex is not running"
     }
 
     public var localizedOfflineDetail: String {
-        switch self {
-        case .codex: return L10n.shared["status.offline_codex"]
-        case .claudeCode: return L10n.shared["status.offline_claude"]
-        }
+        L10n.shared["status.offline_codex"]
     }
 }
 

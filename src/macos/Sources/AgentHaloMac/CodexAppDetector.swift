@@ -5,9 +5,9 @@ enum CodexAppDetector {
     private static var runningCacheValue: Bool?
 
     static func isCodexRunning() -> Bool {
-        if let runningCacheValue {
-            return runningCacheValue
-        }
+        // Do not return a stale "running" cache here. A forcible quit can
+        // miss a workspace termination notification, while AppDelegate polls
+        // this method every 0.3 seconds for the live halo state.
         let value = NSWorkspace.shared.runningApplications.contains { app in
             isCodexApp(app, allowLocalizedName: false)
         }
@@ -25,7 +25,8 @@ enum CodexAppDetector {
 
     @discardableResult
     static func noteApplicationDidTerminate(_ app: NSRunningApplication?) -> Bool {
-        guard runningCacheValue == true else { return false }
+        guard let app, isCodexApp(app, allowLocalizedName: false),
+              runningCacheValue == true else { return false }
         runningCacheValue = nil
         return true
     }
@@ -48,15 +49,34 @@ enum CodexAppDetector {
         _ app: NSRunningApplication,
         allowLocalizedName: Bool
     ) -> Bool {
-        let bundle = app.bundleIdentifier?.lowercased() ?? ""
-        let executableName = app.executableURL?.lastPathComponent.lowercased() ?? ""
-        if bundle.contains("codex") || executableName.contains("codex") {
+        return isCodexDesktopIdentity(
+            activationPolicy: app.activationPolicy,
+            bundleIdentifier: app.bundleIdentifier,
+            executableName: app.executableURL?.lastPathComponent,
+            localizedName: app.localizedName,
+            allowLocalizedName: allowLocalizedName
+        )
+    }
+
+    static func isCodexDesktopIdentity(
+        activationPolicy: NSApplication.ActivationPolicy,
+        bundleIdentifier: String?,
+        executableName: String?,
+        localizedName: String?,
+        allowLocalizedName: Bool
+    ) -> Bool {
+        guard activationPolicy == .regular else {
+            return false
+        }
+        let bundle = bundleIdentifier?.lowercased() ?? ""
+        let executable = executableName?.lowercased() ?? ""
+        if bundle.contains("codex") || executable == "codex" {
             return true
         }
         guard allowLocalizedName else {
             return false
         }
-        let name = app.localizedName?.lowercased() ?? ""
+        let name = localizedName?.lowercased() ?? ""
         return name.contains("codex")
     }
 }

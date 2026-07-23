@@ -80,12 +80,7 @@ public enum DetailsContentResolver {
     }
 
     private static func providerName(for providerID: UsageProviderID) -> String {
-        switch providerID {
-        case .codex:
-            return "Codex"
-        case .claude:
-            return "Claude Code"
-        }
+        "Codex"
     }
 
     private static func warning(
@@ -95,12 +90,7 @@ public enum DetailsContentResolver {
         now: Date
     ) -> String? {
         if status == .signInAgain || failure == .signInAgain {
-            switch providerID {
-            case .codex:
-                return L10n.shared["usage.warning.sign_in_codex"]
-            case .claude:
-                return L10n.shared["usage.warning.sign_in_claude"]
-            }
+            return L10n.shared["usage.warning.sign_in_codex"]
         }
 
         if case .rateLimited = failure {

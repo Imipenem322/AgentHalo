@@ -140,7 +140,7 @@ public actor UsageSnapshotCache: UsageSnapshotCaching {
             removedKeys.insert(key)
         }
 
-        for providerID in [UsageProviderID.codex, .claude] {
+        for providerID in [UsageProviderID.codex] {
             let retainedForProvider = entries
                 .filter { key, _ in
                     key.providerID == providerID && !removedKeys.contains(key)

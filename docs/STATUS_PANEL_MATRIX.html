@@ -330,16 +330,6 @@
           </tbody>
         </table>
       </div>
-      <div class="agent-block">
-        <h3 class="agent-title">Claude Code</h3>
-        <table>
-          <thead><tr><th>大标题</th><th>大标题颜色</th><th>小标题</th><th>触发说明</th></tr></thead>
-          <tbody>
-            <tr><td><span class="headline" style="--headline: var(--idle)">READY</span></td><td><span class="swatch" style="--headline: var(--idle)">#71848C</span></td><td><span class="subtitle">Claude Code 正在待命</span></td><td class="note">没有检测到活动 Claude Code 会话。</td></tr>
-            <tr><td><span class="headline" style="--headline: var(--idle)">PAUSED</span></td><td><span class="swatch" style="--headline: var(--idle)">#71848C</span></td><td><span class="subtitle">Claude Code 正在待命</span></td><td class="note">暂停监听。当前小标题没有单独显示“已暂停”。</td></tr>
-          </tbody>
-        </table>
-      </div>
     </section>
 
     <section class="ring-section" style="--ring: var(--done)">
@@ -355,16 +345,7 @@
         <table>
           <thead><tr><th>大标题</th><th>大标题颜色</th><th>小标题</th><th>触发说明</th></tr></thead>
           <tbody>
-            <tr><td><span class="headline" style="--headline: var(--done)">STANDBY</span></td><td><span class="swatch" style="--headline: var(--done)">#26C66C</span></td><td><span class="subtitle">任务已完成</span></td><td class="note">Codex 运行中且当前 Idle。注意：这里当前小标题按 Done 兜底，所以显示为“任务已完成”。</td></tr>
-          </tbody>
-        </table>
-      </div>
-      <div class="agent-block">
-        <h3 class="agent-title">Claude Code</h3>
-        <table>
-          <thead><tr><th>大标题</th><th>大标题颜色</th><th>小标题</th><th>触发说明</th></tr></thead>
-          <tbody>
-            <tr><td><span class="headline" style="--headline: var(--done)">STANDBY</span></td><td><span class="swatch" style="--headline: var(--done)">#26C66C</span></td><td><span class="subtitle">任务已完成</span></td><td class="note">Claude Code live session 存在且无活动 hook session。注意：这里当前小标题也按 Done 兜底。</td></tr>
+            <tr><td><span class="headline" style="--headline: var(--done)">STANDBY</span></td><td><span class="swatch" style="--headline: var(--done)">#26C66C</span></td><td><span class="subtitle">Codex 正在待命</span></td><td class="note">Codex 桌面进程运行中且当前没有可展示任务；完成态五分钟到期后也会进入此状态。</td></tr>
           </tbody>
         </table>
       </div>
@@ -385,15 +366,6 @@
           <tbody>
             <tr><td><span class="headline" style="--headline: var(--thinking)">THINKING</span></td><td><span class="swatch" style="--headline: var(--thinking)">#E2AA1F</span></td><td><span class="subtitle">正在思考与规划</span></td><td class="note">普通思考、计划、reasoning。</td></tr>
             <tr><td><span class="headline" style="--headline: var(--thinking)">THINKING</span></td><td><span class="swatch" style="--headline: var(--thinking)">#E2AA1F</span></td><td><span class="subtitle">正在分析结果</span></td><td class="note">工具输出后回到思考，且 action 仍为 Reviewing result 的边缘路径。</td></tr>
-          </tbody>
-        </table>
-      </div>
-      <div class="agent-block">
-        <h3 class="agent-title">Claude Code</h3>
-        <table>
-          <thead><tr><th>大标题</th><th>大标题颜色</th><th>小标题</th><th>触发说明</th></tr></thead>
-          <tbody>
-            <tr><td><span class="headline" style="--headline: var(--thinking)">THINKING</span></td><td><span class="swatch" style="--headline: var(--thinking)">#E2AA1F</span></td><td><span class="subtitle">正在思考与规划</span></td><td class="note">UserPromptSubmit、assistant thinking/text，或工具蓝色余韵结束后。</td></tr>
           </tbody>
         </table>
       </div>
@@ -421,20 +393,6 @@
           </tbody>
         </table>
       </div>
-      <div class="agent-block">
-        <h3 class="agent-title">Claude Code</h3>
-        <table>
-          <thead><tr><th>大标题</th><th>大标题颜色</th><th>小标题</th><th>触发说明</th></tr></thead>
-          <tbody>
-            <tr><td><span class="headline" style="--headline: var(--working)">EXECUTING</span></td><td><span class="swatch" style="--headline: var(--working)">#349EC7</span></td><td><span class="subtitle">正在执行命令</span></td><td class="note">Bash 被归一成 shell_command。</td></tr>
-            <tr><td><span class="headline" style="--headline: var(--working)">EXECUTING</span></td><td><span class="swatch" style="--headline: var(--working)">#349EC7</span></td><td><span class="subtitle">正在编辑文件</span></td><td class="note">Edit / Write 类工具。</td></tr>
-            <tr><td><span class="headline" style="--headline: var(--working)">EXECUTING</span></td><td><span class="swatch" style="--headline: var(--working)">#349EC7</span></td><td><span class="subtitle">正在搜索信息</span></td><td class="note">工具名包含 Search 时触发。</td></tr>
-            <tr><td><span class="headline" style="--headline: var(--working)">EXECUTING</span></td><td><span class="swatch" style="--headline: var(--working)">#349EC7</span></td><td><span class="subtitle">正在压缩上下文</span></td><td class="note">PreCompact hook。</td></tr>
-            <tr><td><span class="headline" style="--headline: var(--working)">EXECUTING</span></td><td><span class="swatch" style="--headline: var(--working)">#349EC7</span></td><td><span class="subtitle">正在分析结果</span></td><td class="note">PostToolUse / tool_result 后的短暂蓝色保持。</td></tr>
-            <tr><td><span class="headline" style="--headline: var(--working)">EXECUTING</span></td><td><span class="swatch" style="--headline: var(--working)">#349EC7</span></td><td><span class="subtitle">正在执行任务</span></td><td class="note">未知工具、工具失败余韵、未命中特殊小标题时的兜底。</td></tr>
-          </tbody>
-        </table>
-      </div>
     </section>
 
     <section class="ring-section" style="--ring: var(--done)">
@@ -454,15 +412,6 @@
           </tbody>
         </table>
       </div>
-      <div class="agent-block">
-        <h3 class="agent-title">Claude Code</h3>
-        <table>
-          <thead><tr><th>大标题</th><th>大标题颜色</th><th>小标题</th><th>触发说明</th></tr></thead>
-          <tbody>
-            <tr><td colspan="4" class="note">当前 Claude Code 分支没有启用 AnswerStreaming 视觉模式。</td></tr>
-          </tbody>
-        </table>
-      </div>
     </section>
 
     <section class="ring-section" style="--ring: var(--done)">
@@ -470,7 +419,7 @@
         <div class="ring flash"></div>
         <div class="ring-meta">
           <h2>绿色完成环 <span class="tag">Done</span></h2>
-          <p>任务完成时显示完成绿，进入时有双峰高亮，随后进入完成态呼吸。</p>
+          <p>普通任务完成时显示完成绿，进入时有双峰高亮，随后最多呼吸五分钟。</p>
         </div>
       </div>
       <div class="agent-block">
@@ -478,17 +427,7 @@
         <table>
           <thead><tr><th>大标题</th><th>大标题颜色</th><th>小标题</th><th>触发说明</th></tr></thead>
           <tbody>
-            <tr><td><span class="headline" style="--headline: var(--done)">COMPLETE</span></td><td><span class="swatch" style="--headline: var(--done)">#26C66C</span></td><td><span class="subtitle">任务已完成</span></td><td class="note">普通模式 task_complete。</td></tr>
-          </tbody>
-        </table>
-      </div>
-      <div class="agent-block">
-        <h3 class="agent-title">Claude Code</h3>
-        <table>
-          <thead><tr><th>大标题</th><th>大标题颜色</th><th>小标题</th><th>触发说明</th></tr></thead>
-          <tbody>
-            <tr><td><span class="headline" style="--headline: var(--done)">COMPLETE</span></td><td><span class="swatch" style="--headline: var(--done)">#26C66C</span></td><td><span class="subtitle">任务已完成</span></td><td class="note">Stop / turn_duration / stop_hook_summary。</td></tr>
-            <tr><td><span class="headline" style="--headline: var(--done)">COMPLETE</span></td><td><span class="swatch" style="--headline: var(--done)">#26C66C</span></td><td><span class="subtitle">上下文压缩完成</span></td><td class="note">非活动会话触发 PostCompact，Action = Context compacted。</td></tr>
+            <tr><td><span class="headline" style="--headline: var(--done)">COMPLETE</span></td><td><span class="swatch" style="--headline: var(--done)">#26C66C</span></td><td><span class="subtitle">任务已完成</span></td><td class="note">普通模式 task_complete；仅在 Codex 桌面进程运行且完成后未满五分钟时显示。</td></tr>
           </tbody>
         </table>
       </div>
@@ -508,16 +447,6 @@
           <thead><tr><th>大标题</th><th>大标题颜色</th><th>小标题</th><th>触发说明</th></tr></thead>
           <tbody>
             <tr><td><span class="headline" style="--headline: var(--attention)">NEEDS YOU</span></td><td><span class="swatch" style="--headline: var(--attention)">#8E6CEC</span></td><td><span class="subtitle">等待你的授权或输入</span></td><td class="note">approval / request_user / needs_input / Plan Mode 提案完成等待选择。</td></tr>
-          </tbody>
-        </table>
-      </div>
-      <div class="agent-block">
-        <h3 class="agent-title">Claude Code</h3>
-        <table>
-          <thead><tr><th>大标题</th><th>大标题颜色</th><th>小标题</th><th>触发说明</th></tr></thead>
-          <tbody>
-            <tr><td><span class="headline" style="--headline: var(--attention)">NEEDS YOU</span></td><td><span class="swatch" style="--headline: var(--attention)">#8E6CEC</span></td><td><span class="subtitle">等待你的授权</span></td><td class="note">AskUserQuestion / PermissionRequest，Action = Awaiting permission。</td></tr>
-            <tr><td><span class="headline" style="--headline: var(--attention)">NEEDS YOU</span></td><td><span class="swatch" style="--headline: var(--attention)">#8E6CEC</span></td><td><span class="subtitle">授权已拒绝</span></td><td class="note">PermissionDenied，Action = Permission denied。</td></tr>
           </tbody>
         </table>
       </div>
@@ -541,20 +470,10 @@
           </tbody>
         </table>
       </div>
-      <div class="agent-block">
-        <h3 class="agent-title">Claude Code</h3>
-        <table>
-          <thead><tr><th>大标题</th><th>大标题颜色</th><th>小标题</th><th>触发说明</th></tr></thead>
-          <tbody>
-            <tr><td><span class="headline" style="--headline: var(--error)">INTERRUPTED</span></td><td><span class="swatch" style="--headline: var(--error)">#DA3256</span></td><td><span class="subtitle">任务已中断</span></td><td class="note">Error 状态但 aggregate.Detail 为空。</td></tr>
-            <tr><td><span class="headline" style="--headline: var(--error)">INTERRUPTED</span></td><td><span class="swatch" style="--headline: var(--error)">#DA3256</span></td><td><span class="subtitle">具体错误详情</span></td><td class="note">api_error、StopFailure 等。当前 aggregate.Detail 可能包含项目名和 action。</td></tr>
-          </tbody>
-        </table>
-      </div>
     </section>
 
     <p class="warning">
-      当前实现里有两个语义不一致点：<strong>PAUSED</strong> 的小标题仍显示“正在待命”，<strong>STANDBY</strong> 的小标题仍显示“任务已完成”。
+      当前实现里有一个语义不一致点：<strong>PAUSED</strong> 的小标题仍显示“正在待命”。
       这张矩阵按现有代码如实列出，没有替它修正文案。
     </p>
   </main>
