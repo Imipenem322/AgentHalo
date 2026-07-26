@@ -11,130 +11,160 @@
     <img src="https://img.shields.io/badge/版本-0.15.0-14B8A6?style=flat-square" alt="版本 0.15.0"/>
     <img src="https://img.shields.io/badge/许可证-MIT-2563EB?style=flat-square" alt="MIT 许可证"/>
     <img src="https://img.shields.io/badge/Windows-仅支持%20Codex-0078D4?style=flat-square&logo=windows" alt="Windows 仅支持 Codex"/>
+    <img src="https://img.shields.io/badge/macOS-13%2B-000000?style=flat-square&logo=apple" alt="macOS 13+"/>
   </p>
-  <p>Agent 的本地常驻状态光环。在桌面上原生呈现各种 Agent 的执行与规划状态。</p>
+  <p>面向个人 Codex 工作流的桌面常驻状态光环。</p>
   <p><a href="README.md">English</a> | 简体中文</p>
 </div>
-
-
----
 
 > [!IMPORTANT]
 > 本仓库基于开源的
 > [Agent Halo 项目](https://github.com/NePixe1/AgentHalo)修改和改进，继续遵循
-> 上游 MIT 许可证。本版本的独立改动主要集中在更精简的 Windows Codex-only
-> 构建，以及简化后的 Windows 额度详情面板。
+> 上游 MIT 许可证。这是一个面向我个人 Codex 使用习惯的个性化版本。请优先访问、
+> Star 和关注原项目；本仓库只是建立在原项目基础上的一组实用改动。
 
-跨平台行为以
-[`src/shared/spec/agent-halo.v2.json`](src/shared/spec/agent-halo.v2.json)
-为唯一参数来源，并生成 C# 与 Swift 常量；Windows 和 macOS 继续使用各自的原生渲染。
-详见 [共享契约说明](src/shared/README.md) 与
-[跨平台架构说明](docs/CROSS_PLATFORM_SHARED_CONTRACT.md)。
+## 这个版本改了什么
 
-## 系统要求
+这个仓库不是用来替代上游 Agent Halo 的。它保留了“桌面状态光环”的核心想法，
+但把功能收窄到我自己更常用的 Codex-only 流程：
 
-- Windows 10/11 或 macOS 13+
-- 已安装并使用 Codex 桌面端
-- Windows 需要 .NET Framework 4.8（目前的 Windows 10/11 通常已自带）
+- Windows 和 macOS 都只监听 Codex。
+- 移除了 Claude Code 监听、hooks、status line proxy 以及相关 macOS 组件。
+- Windows 悬停面板更聚焦 Codex 状态、上下文、模型和本轮 Token 信息。
+- 只有在官方 Codex OAuth 额度数据可用时才显示官方额度；自定义供应商不会伪装出官方额度行。
+- 普通任务完成后的绿色状态最多保留 5 分钟；Codex 仍在运行时回到待机，Codex 退出时转为离线。
+- 5 分钟窗口内出现新的思考、执行、等待确认或错误状态时，会立即覆盖旧的完成态。
+- Plan Mode 的等待确认状态保持持续提示，不套用完成态 5 分钟超时。
+- 跨平台状态参数继续由
+  [`src/shared/spec/agent-halo.v2.json`](src/shared/spec/agent-halo.v2.json)
+  生成到 C# 和 Swift。
 
-## macOS 开发版
+## 当前范围
 
-运行并验证：
+| 平台 | 当前范围 | 说明 |
+| --- | --- | --- |
+| Windows 10/11 | 仅 Codex | 原生 WPF 应用和 ZIP 发布包。 |
+| macOS 13+ | 仅 Codex | 原生 Swift/AppKit 开发版。 |
 
-```bash
-bash ./scripts/run-macos.sh --verify
-```
+这个版本按我的个人桌面使用方式取舍。如果你想了解更完整的上游路线，特别是历史上的多 Agent 支持，请以
+[NePixe1/AgentHalo](https://github.com/NePixe1/AgentHalo) 为主要参考。
 
-应用是菜单栏辅助应用，不显示 Dock 图标。可以从菜单栏 Agent Halo 图标退出，也可以执行：
+## Windows 发布包
 
-```bash
-pkill -x AgentHaloMac
-```
+1. 从本仓库 Releases 下载 `AgentHalo-Windows-v*.zip`。
+2. 解压整个 ZIP，不要直接在压缩包里运行。
+3. 用 `SHA256.txt` 校验 `AgentHalo.exe`。
+4. 运行 `AgentHalo.exe`。
 
-诊断命令：
-
-```bash
-cd src/macos
-swift run AgentHaloDiagnostics --self-test /tmp/agent-halo-self-test.txt
-swift run AgentHaloDiagnostics --render-states /tmp/agent-halo-states
-swift run AgentHaloDiagnostics --transition-strip /tmp/agent-halo-transitions
-```
-
-## 安装与运行
-
-1. 从 GitHub Releases 下载最新的 `AgentHalo-Windows-v*.zip`。
-2. 解压整个 ZIP 压缩包，不要直接在压缩包内运行。
-3. 双击 `AgentHalo.exe`，光环会出现在主显示器右上方附近。
-
-程序没有安装器，也不需要 OpenAI API Key。为独立刷新额度，Agent Halo
-会复用 Codex 已有的 OAuth 登录凭据；OAuth Token 轮换时会原子更新 Codex
-原有的 `auth.json`。
-
-## 操作
-
-- 拖动光环：调整位置，靠近屏幕边缘时会自动吸附。
-- 鼠标悬停：查看当前状态；官方 Codex OAuth 显示当前可用额度、剩余百分比和重置时间。
-- 使用 CCSwitch、自定义模型提供商或 API Key 时，Codex 面板会自动改为显示项目、模型和本轮输入/输出 Token，不展示 API Key、Base URL 或中转工具名称。
-- Windows 和 macOS 版本都只监听 Codex。
-- 上下文 pill 显示 Codex 的上下文占用。
-- Codex 官方额度行只在 OAuth 模式显示；自定义 API 模式使用相同高度的项目、模型和 Token 信息行，不混入虚假的官方额度。
-- 普通任务完成后绿色会缓慢呼吸，最多持续 5 分钟；期间有新状态会立即替换它。Codex 桌面进程仍在运行时，到期后显示不发光的稳定绿色待机；该进程退出则显示离线。
-- 右键单击：打开状态预览、暂停监听、开机启动和退出菜单。
-- 右键”光环大小”：选择 `75% / 100% / 125%`，重启后保持设置。
-- macOS 会记住光环所属显示器及相对位置；该显示器断开时临时移到主屏右上角，重新连接后恢复原位置。临时回退期间如果手动拖动光环，新位置会成为首选位置，不再返回原显示器。
-- Windows 保持原有离屏恢复行为：启动或显示器变化后，如果光环完全离开所有屏幕，会自动移回主屏右上角。
-- 两个平台都可从右键菜单选择“脱离卡死”，明确重置到主屏右上角。
-- 单击光环：将 Codex 窗口切到前台。
-
-## 状态含义
-
-- 黄色长亮短暗：Agent 正在思考或规划。
-- 蓝色长亮短暗：Agent 正在执行命令、搜索、编辑文件或调用工具。
-- 绿色双闪：Agent 已完成；高亮两次后缓慢呼吸，最多持续 5 分钟（仅在 Codex 桌面进程仍运行时）。
-- 珊瑚橙双脉冲：Agent 正在等待 Yes、授权、确认或输入。
-- 红色：仅表示阻止任务继续的故障；未查看时爆闪，打开 Codex 后常亮，离开后变为暗红。
-- 稳定绿色：被监听的 Agent 已运行且当前没有活动任务。
-- 暗白色：当前没有可见的 Agent 活动。
-
-详细动效规则按平台拆分：
-
-- [Windows 视觉行为说明](docs/WINDOWS_VISUAL_BEHAVIOR.md)
-- [macOS 视觉行为说明](docs/MACOS_VISUAL_BEHAVIOR.md)
-- 共享状态机契约见 [CROSS_PLATFORM_SHARED_CONTRACT.md](docs/CROSS_PLATFORM_SHARED_CONTRACT.md)。
-
-## 隐私
-
-Agent Halo 只在本机读取 Codex 会话目录中的生命周期事件，并只读查询
-`logs_2.sqlite` 中结构化的 Codex 连接和服务故障记录。程序不会配置
-Claude Code hooks、status line，也不会读取 Claude Code 会话或凭据。
-
-为了独立刷新 Codex 额度，程序会读取现有 OAuth 登录凭据，并仅向
-`auth.openai.com` 与 `chatgpt.com` 的官方接口发起 HTTPS 请求。OAuth Token
-不会写入 Agent Halo 缓存；Token 轮换时只会原子写回 Codex 原有凭据文件。
-Agent Halo 的额度缓存仅保存账户哈希、使用百分比和重置时间，不上传会话内容，
-也不读取或保存 OpenAI API Key。
-
-## Windows 安全提示
-
-这是一个未购买商业代码签名证书的自制程序，因此 Windows SmartScreen 可能提示
-“Windows 已保护你的电脑”。请只在确认压缩包来自可信发送者、并核对
-`SHA256.txt` 后运行。确认无误时，可选择“更多信息”查看程序名称。
-
-可以在解压后的文件夹中打开 PowerShell，并执行：
+PowerShell 校验：
 
 ```powershell
 Get-FileHash .\AgentHalo.exe -Algorithm SHA256
 ```
 
-输出的哈希值应与 `SHA256.txt` 中的值完全一致。
+这个 Windows 构建没有购买商业代码签名证书，首次运行时 SmartScreen 可能提示风险。
 
----
+发布时只上传 `outputs/AgentHalo-Windows-v*.zip`。压缩包内包含
+`AgentHalo.exe`、`README.md` 和 `SHA256.txt`；`outputs/AgentHalo/` 解压目录只用于本地检查。
 
-## 项目声明
+## 构建与验证
 
-本仓库是开源
-[Agent Halo 项目](https://github.com/NePixe1/AgentHalo)的独立修改版本，保留并遵循
-上游 MIT 许可证。除非文件另有说明，本仓库新增修改同样以 MIT 许可证发布。
+Windows 需要：
 
-Agent Halo 是非官方社区项目，与 OpenAI、Quantic Dream 均无隶属或背书关系。
-项目不包含其专有素材、Logo 或照搬的指示灯几何造型。
+- Windows 10 或 Windows 11
+- Windows PowerShell
+- .NET Framework 4.8
+
+Windows 构建：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\build-windows.ps1
+```
+
+Windows 自检：
+
+```powershell
+$report = ".\outputs\agenthalo-selftest.txt"
+.\outputs\AgentHalo\AgentHalo.exe --self-test $report
+Get-Content $report
+Remove-Item -LiteralPath $report
+```
+
+期望结果：
+
+```text
+PASS
+Lifecycle, topmost guard, usage metrics, panel formatting, and animation checks passed.
+```
+
+macOS 需要：
+
+- macOS 13 或更高版本
+- Swift 6 工具链
+
+macOS 验证：
+
+```bash
+bash ./scripts/run-macos.sh --verify
+```
+
+共享契约检查：
+
+```bash
+python -m pip install -r scripts/requirements-ci.in
+python scripts/validate_schema.py
+python scripts/generate_shared.py --check
+python scripts/check_shared.py
+```
+
+同一组平台检查也会在
+[`ci.yml`](.github/workflows/ci.yml) 中运行。
+
+## 桌面行为
+
+- 拖动光环可以调整位置，靠近屏幕边缘时会吸附。
+- Windows 悬停面板显示 Codex 状态、上下文、额度、模型和本轮 Token 信息。
+- 单击光环会把 Codex 窗口切到前台。
+- 右键菜单提供暂停监听、开机启动、状态预览、光环大小、重置位置和退出。
+- 光环大小支持 `75%`、`100%`、`125%`。
+- 光环跑到屏幕外时，可以用“脱离卡死”重置到主屏右上角。
+
+## 状态含义
+
+| 状态 | 含义 |
+| --- | --- |
+| Thinking | Codex 正在思考或规划。 |
+| Working | Codex 正在执行命令、编辑、搜索或调用工具。 |
+| Completed | 普通任务刚完成，最多保留 5 分钟。 |
+| Attention | Codex 正在等待授权、确认或输入。 |
+| Error | 有阻止任务继续的故障需要处理。 |
+| Standby | Codex 正在运行，但当前没有活动任务。 |
+| Offline | 当前没有检测到可见的 Codex 桌面进程。 |
+
+更细的动效规则见
+[`docs/WINDOWS_VISUAL_BEHAVIOR.md`](docs/WINDOWS_VISUAL_BEHAVIOR.md)、
+[`docs/MACOS_VISUAL_BEHAVIOR.md`](docs/MACOS_VISUAL_BEHAVIOR.md) 和
+[`docs/CROSS_PLATFORM_SHARED_CONTRACT.md`](docs/CROSS_PLATFORM_SHARED_CONTRACT.md)。
+
+## 隐私
+
+Agent Halo 在本机运行。它读取 Codex 生命周期、会话状态，以及用于显示光环的结构化诊断记录。
+它不会上传会话内容。
+
+当官方 Codex OAuth 额度刷新可用时，程序可以复用 Codex 现有 OAuth 会话，并访问官方
+OpenAI/ChatGPT 端点获取派生额度数据。详情面板不会展示 API Key、Base URL、中转服务名称或
+OAuth Token。缓存的使用数据仅限账户派生标识、百分比和重置时间。
+
+## 致谢
+
+这是
+[NePixe1/AgentHalo](https://github.com/NePixe1/AgentHalo) 的个性化下游版本。
+原项目应该获得主要关注；本仓库只记录我围绕 Codex 工作流做出的改动和发布包。
+
+上游版权和许可证声明继续适用。除非文件另有说明，本仓库新增修改同样按 MIT 许可证发布。
+
+Agent Halo 是非官方社区项目，与 OpenAI、Quantic Dream 均无隶属或背书关系，也不包含它们的专有素材。
+
+## 许可证
+
+遵循 [MIT License](LICENSE)。
