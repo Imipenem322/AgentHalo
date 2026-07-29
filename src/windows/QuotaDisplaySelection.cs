@@ -5,6 +5,7 @@ namespace CodexHalo
     public enum QuotaDisplayKind
     {
         None,
+        FiveHour,
         Weekly,
         CurrentAvailable
     }
@@ -24,16 +25,52 @@ namespace CodexHalo
         {
             get
             {
-                return Kind == QuotaDisplayKind.Weekly
-                    ? "quota.weekly"
-                    : "quota.current_available";
+                switch (Kind)
+                {
+                    case QuotaDisplayKind.FiveHour:
+                        return "quota.5h";
+                    case QuotaDisplayKind.CurrentAvailable:
+                        return "quota.current_available";
+                    default:
+                        return "quota.weekly";
+                }
             }
         }
     }
 
+    public sealed class QuotaDisplaySet
+    {
+        public QuotaDisplaySelection FiveHour;
+        public QuotaDisplaySelection LongTerm;
+    }
+
     public static class QuotaDisplaySelector
     {
-        public static QuotaDisplaySelection Select(UsageMetrics metrics)
+        public static QuotaDisplaySet Select(UsageMetrics metrics)
+        {
+            return new QuotaDisplaySet
+            {
+                FiveHour = SelectFiveHour(metrics),
+                LongTerm = SelectLongTerm(metrics)
+            };
+        }
+
+        private static QuotaDisplaySelection SelectFiveHour(UsageMetrics metrics)
+        {
+            if (metrics != null && metrics.HasFiveHour)
+            {
+                return new QuotaDisplaySelection
+                {
+                    Kind = QuotaDisplayKind.FiveHour,
+                    UsedPercent = metrics.FiveHourUsedPercent,
+                    ResetUtc = metrics.FiveHourResetUtc
+                };
+            }
+
+            return Empty();
+        }
+
+        private static QuotaDisplaySelection SelectLongTerm(UsageMetrics metrics)
         {
             if (metrics != null && metrics.HasWeekly)
             {
@@ -55,6 +92,11 @@ namespace CodexHalo
                 };
             }
 
+            return Empty();
+        }
+
+        private static QuotaDisplaySelection Empty()
+        {
             return new QuotaDisplaySelection
             {
                 Kind = QuotaDisplayKind.None,

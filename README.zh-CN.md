@@ -8,7 +8,7 @@
 
 <div align="center">
   <p>
-    <img src="https://img.shields.io/badge/版本-0.15.0-14B8A6?style=flat-square" alt="版本 0.15.0"/>
+    <img src="https://img.shields.io/badge/版本-0.15.1-14B8A6?style=flat-square" alt="版本 0.15.1"/>
     <img src="https://img.shields.io/badge/许可证-MIT-2563EB?style=flat-square" alt="MIT 许可证"/>
     <img src="https://img.shields.io/badge/Windows-仅支持%20Codex-0078D4?style=flat-square&logo=windows" alt="Windows 仅支持 Codex"/>
     <img src="https://img.shields.io/badge/macOS-13%2B-000000?style=flat-square&logo=apple" alt="macOS 13+"/>
@@ -31,7 +31,7 @@
 - Windows 和 macOS 都只监听 Codex。
 - 移除了 Claude Code 监听、hooks、status line proxy 以及相关 macOS 组件。
 - Windows 悬停面板更聚焦 Codex 状态、上下文、模型和本轮 Token 信息。
-- 只有在官方 Codex OAuth 额度数据可用时才显示官方额度；自定义供应商不会伪装出官方额度行。
+- 官方 Codex OAuth 模式会分别显示可用的 5 小时和每周额度；自定义供应商不会伪装出官方额度行。
 - 普通任务完成后的绿色状态最多保留 5 分钟；Codex 仍在运行时回到待机，Codex 退出时转为离线。
 - 5 分钟窗口内出现新的思考、执行、等待确认或错误状态时，会立即覆盖旧的完成态。
 - Plan Mode 的等待确认状态保持持续提示，不套用完成态 5 分钟超时。
@@ -123,7 +123,7 @@ python scripts/check_shared.py
 ## 桌面行为
 
 - 拖动光环可以调整位置，靠近屏幕边缘时会吸附。
-- Windows 悬停面板显示 Codex 状态、上下文、额度、模型和本轮 Token 信息。
+- Windows 悬停面板显示 Codex 状态、上下文、独立的 5 小时与每周额度、模型和本轮 Token 信息。
 - 单击光环会把 Codex 窗口切到前台。
 - 右键菜单提供暂停监听、开机启动、状态预览、光环大小、重置位置和退出。
 - 光环大小支持 `75%`、`100%`、`125%`。

@@ -140,10 +140,14 @@ public sealed class DetailsWindow : Window
         private readonly TextBlock headline;
         private readonly TextBlock subtitle;
         private readonly Border shell;
-        private readonly TextBlock quotaLabel;
-        private readonly TextBlock quotaValue;
-        private readonly TextBlock quotaReset;
-        private readonly Grid quotaRow;
+        private readonly TextBlock fiveHourLabel;
+        private readonly TextBlock fiveHourValue;
+        private readonly TextBlock fiveHourReset;
+        private readonly Grid fiveHourRow;
+        private readonly TextBlock longTermLabel;
+        private readonly TextBlock longTermValue;
+        private readonly TextBlock longTermReset;
+        private readonly Grid longTermRow;
         private readonly ContextBatteryMeter contextMeter;
         private readonly StackPanel quotaGroup;
         private readonly StackPanel infoGroup;
@@ -159,9 +163,10 @@ public sealed class DetailsWindow : Window
         private readonly TextBlock infoProjectValue;
         private readonly TextBlock infoModelValue;
         private readonly TextBlock infoTokenValue;
-        private readonly RoundedMeter quotaBar;
+        private readonly RoundedMeter fiveHourBar;
+        private readonly RoundedMeter longTermBar;
         private readonly DispatcherTimer quotaTimer;
-        private string quotaLabelKey;
+        private string longTermLabelKey;
         private UsageMetrics previewMetrics;
         private CodexCustomApiMetrics previewCodexCustomMetrics;
         private AggregateSnapshot currentAggregate;
@@ -225,14 +230,20 @@ public sealed class DetailsWindow : Window
             subtitle.Margin = new Thickness(0, 1, 0, 13);
             content.Children.Add(subtitle);
 
-            quotaLabelKey = "quota.current_available";
+            longTermLabelKey = "quota.weekly";
             quotaGroup = new StackPanel
             {
                 VerticalAlignment = VerticalAlignment.Center
             };
-            quotaRow = CreateQuotaRow(L10n.Instance[quotaLabelKey], out quotaLabel,
-                out quotaReset, out quotaValue, out quotaBar);
-            quotaGroup.Children.Add(quotaRow);
+            fiveHourRow = CreateQuotaRow(L10n.Instance["quota.5h"],
+                out fiveHourLabel, out fiveHourReset, out fiveHourValue,
+                out fiveHourBar);
+            quotaGroup.Children.Add(fiveHourRow);
+            longTermRow = CreateQuotaRow(L10n.Instance[longTermLabelKey],
+                out longTermLabel, out longTermReset, out longTermValue,
+                out longTermBar);
+            longTermRow.Margin = new Thickness(0, 11, 0, 0);
+            quotaGroup.Children.Add(longTermRow);
 
             // These generic rows are used by Codex custom API/provider mode.
             infoGroup = new StackPanel
@@ -253,6 +264,7 @@ public sealed class DetailsWindow : Window
             infoGroup.Children.Add(infoTokenRow);
 
             dataLayer = new Grid();
+            dataLayer.Height = 80;
             dataLayer.VerticalAlignment = VerticalAlignment.Top;
             dataLayer.Children.Add(quotaGroup);
             dataLayer.Children.Add(infoGroup);
@@ -527,13 +539,18 @@ public sealed class DetailsWindow : Window
 
         private void ApplyQuotaMetrics(UsageMetrics metrics)
         {
-            QuotaDisplaySelection selection = QuotaDisplaySelector.Select(metrics);
-            quotaLabelKey = selection.LabelKey;
-            quotaLabel.Text = L10n.Instance[quotaLabelKey];
-            quotaRow.Visibility = Visibility.Visible;
-            quotaRow.Margin = new Thickness(0);
-            ApplyQuota(selection.HasQuota, selection.UsedPercent,
-                selection.ResetUtc, quotaValue, quotaReset, quotaBar);
+            QuotaDisplaySet display = QuotaDisplaySelector.Select(metrics);
+            fiveHourLabel.Text = L10n.Instance["quota.5h"];
+            longTermLabelKey = display.LongTerm.LabelKey;
+            longTermLabel.Text = L10n.Instance[longTermLabelKey];
+            fiveHourRow.Visibility = Visibility.Visible;
+            longTermRow.Visibility = Visibility.Visible;
+            ApplyQuota(display.FiveHour.HasQuota,
+                display.FiveHour.UsedPercent, display.FiveHour.ResetUtc,
+                fiveHourValue, fiveHourReset, fiveHourBar);
+            ApplyQuota(display.LongTerm.HasQuota,
+                display.LongTerm.UsedPercent, display.LongTerm.ResetUtc,
+                longTermValue, longTermReset, longTermBar);
         }
 
         private static void ApplyQuota(bool available, double usedPercent,
@@ -706,7 +723,8 @@ public sealed class DetailsWindow : Window
 
         private void RefreshAllText()
         {
-            quotaLabel.Text = L10n.Instance[quotaLabelKey];
+            fiveHourLabel.Text = L10n.Instance["quota.5h"];
+            longTermLabel.Text = L10n.Instance[longTermLabelKey];
             infoProjectTitle.Text = L10n.Instance["metadata.project"];
             infoModelTitle.Text = L10n.Instance["metadata.model"];
             infoTokenTitle.Text = L10n.Instance["metadata.tokens"];

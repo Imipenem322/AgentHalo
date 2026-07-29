@@ -572,7 +572,7 @@ public static class Diagnostics
                     "fatal turn clears plan flag");
                 Assert(GeneratedHaloSpec.ContractVersion == 2,
                     "generated shared contract version");
-                Assert(GeneratedHaloSpec.ReleaseVersion == "0.15.0",
+                Assert(GeneratedHaloSpec.ReleaseVersion == "0.15.1",
                     "generated shared release version");
                 Assert(GeneratedHaloSpec.State(HaloState.Attention).Label == "NEEDS YOU",
                     "generated state labels");
@@ -751,7 +751,7 @@ public static class Diagnostics
                     "future quota reset remains valid");
                 DateTime fiveHourReset = DateTime.UtcNow.AddHours(4);
                 DateTime weeklyReset = DateTime.UtcNow.AddDays(4);
-                QuotaDisplaySelection quotaSelection = QuotaDisplaySelector.Select(
+                QuotaDisplaySet quotaSet = QuotaDisplaySelector.Select(
                     new UsageMetrics
                     {
                         HasFiveHour = true,
@@ -761,58 +761,76 @@ public static class Diagnostics
                         WeeklyUsedPercent = 67,
                         WeeklyResetUtc = weeklyReset
                     });
-                Assert(quotaSelection.HasQuota &&
-                    quotaSelection.Kind == QuotaDisplayKind.Weekly &&
-                    Math.Abs(quotaSelection.UsedPercent - 67) < 0.001 &&
-                    quotaSelection.ResetUtc == weeklyReset,
-                    "visible quota prefers weekly over five-hour data");
+                Assert(quotaSet.FiveHour.HasQuota &&
+                    quotaSet.FiveHour.Kind == QuotaDisplayKind.FiveHour &&
+                    quotaSet.FiveHour.LabelKey == "quota.5h" &&
+                    Math.Abs(quotaSet.FiveHour.UsedPercent - 23) < 0.001 &&
+                    quotaSet.FiveHour.ResetUtc == fiveHourReset &&
+                    quotaSet.LongTerm.HasQuota &&
+                    quotaSet.LongTerm.Kind == QuotaDisplayKind.Weekly &&
+                    Math.Abs(quotaSet.LongTerm.UsedPercent - 67) < 0.001 &&
+                    quotaSet.LongTerm.ResetUtc == weeklyReset,
+                    "five-hour and weekly quotas stay independently visible");
 
                 DateTime weeklyOnlyReset = DateTime.UtcNow.AddDays(5);
-                quotaSelection = QuotaDisplaySelector.Select(new UsageMetrics
+                quotaSet = QuotaDisplaySelector.Select(new UsageMetrics
                 {
                     HasWeekly = true,
                     WeeklyUsedPercent = 42,
                     WeeklyResetUtc = weeklyOnlyReset
                 });
-                Assert(quotaSelection.HasQuota &&
-                    quotaSelection.Kind == QuotaDisplayKind.Weekly &&
-                    quotaSelection.LabelKey == "quota.weekly" &&
-                    Math.Abs(quotaSelection.UsedPercent - 42) < 0.001 &&
-                    quotaSelection.ResetUtc == weeklyOnlyReset,
-                    "weekly-only data selects the weekly quota");
+                Assert(!quotaSet.FiveHour.HasQuota &&
+                    quotaSet.FiveHour.Kind == QuotaDisplayKind.None &&
+                    quotaSet.LongTerm.HasQuota &&
+                    quotaSet.LongTerm.Kind == QuotaDisplayKind.Weekly &&
+                    quotaSet.LongTerm.LabelKey == "quota.weekly" &&
+                    Math.Abs(quotaSet.LongTerm.UsedPercent - 42) < 0.001 &&
+                    quotaSet.LongTerm.ResetUtc == weeklyOnlyReset,
+                    "weekly-only data clears five-hour and keeps weekly");
 
                 DateTime currentAvailableReset = DateTime.UtcNow.AddDays(20);
-                quotaSelection = QuotaDisplaySelector.Select(new UsageMetrics
+                quotaSet = QuotaDisplaySelector.Select(new UsageMetrics
                 {
                     HasMonthly = true,
                     MonthlyUsedPercent = 35,
                     MonthlyResetUtc = currentAvailableReset
                 });
-                Assert(quotaSelection.HasQuota &&
-                    quotaSelection.Kind == QuotaDisplayKind.CurrentAvailable &&
-                    quotaSelection.LabelKey == "quota.current_available" &&
-                    Math.Abs(quotaSelection.UsedPercent - 35) < 0.001 &&
-                    quotaSelection.ResetUtc == currentAvailableReset,
+                Assert(!quotaSet.FiveHour.HasQuota &&
+                    quotaSet.LongTerm.HasQuota &&
+                    quotaSet.LongTerm.Kind == QuotaDisplayKind.CurrentAvailable &&
+                    quotaSet.LongTerm.LabelKey == "quota.current_available" &&
+                    Math.Abs(quotaSet.LongTerm.UsedPercent - 35) < 0.001 &&
+                    quotaSet.LongTerm.ResetUtc == currentAvailableReset,
                     "monthly or credits data uses the generic available quota");
 
-                quotaSelection = QuotaDisplaySelector.Select(new UsageMetrics
+                fiveHourReset = DateTime.UtcNow.AddHours(3);
+                quotaSet = QuotaDisplaySelector.Select(new UsageMetrics
                 {
                     HasFiveHour = true,
                     FiveHourUsedPercent = 88,
-                    FiveHourResetUtc = DateTime.UtcNow.AddHours(3)
+                    FiveHourResetUtc = fiveHourReset
                 });
-                Assert(!quotaSelection.HasQuota &&
-                    quotaSelection.Kind == QuotaDisplayKind.None &&
-                    Math.Abs(quotaSelection.UsedPercent) < 0.001 &&
-                    quotaSelection.ResetUtc == DateTime.MinValue,
-                    "five-hour-only data does not fabricate a visible weekly quota");
+                Assert(quotaSet.FiveHour.HasQuota &&
+                    quotaSet.FiveHour.Kind == QuotaDisplayKind.FiveHour &&
+                    Math.Abs(quotaSet.FiveHour.UsedPercent - 88) < 0.001 &&
+                    quotaSet.FiveHour.ResetUtc == fiveHourReset &&
+                    !quotaSet.LongTerm.HasQuota &&
+                    quotaSet.LongTerm.Kind == QuotaDisplayKind.None &&
+                    quotaSet.LongTerm.LabelKey == "quota.weekly" &&
+                    quotaSet.LongTerm.ResetUtc == DateTime.MinValue,
+                    "five-hour-only data remains five-hour without fabricating weekly");
 
-                quotaSelection = QuotaDisplaySelector.Select(new UsageMetrics());
-                Assert(!quotaSelection.HasQuota &&
-                    quotaSelection.Kind == QuotaDisplayKind.None &&
-                    Math.Abs(quotaSelection.UsedPercent) < 0.001 &&
-                    quotaSelection.ResetUtc == DateTime.MinValue,
-                    "missing visible quotas clear percentage and reset time");
+                quotaSet = QuotaDisplaySelector.Select(new UsageMetrics());
+                Assert(!quotaSet.FiveHour.HasQuota &&
+                    quotaSet.FiveHour.Kind == QuotaDisplayKind.None &&
+                    Math.Abs(quotaSet.FiveHour.UsedPercent) < 0.001 &&
+                    quotaSet.FiveHour.ResetUtc == DateTime.MinValue &&
+                    !quotaSet.LongTerm.HasQuota &&
+                    quotaSet.LongTerm.Kind == QuotaDisplayKind.None &&
+                    quotaSet.LongTerm.LabelKey == "quota.weekly" &&
+                    Math.Abs(quotaSet.LongTerm.UsedPercent) < 0.001 &&
+                    quotaSet.LongTerm.ResetUtc == DateTime.MinValue,
+                    "missing quotas clear both percentages and reset times");
                 string contextOnlyRate =
                     "{\"payload\":{\"info\":{\"rate_limits\":{}," +
                     "\"last_token_usage\":{\"input_tokens\":50}," +
@@ -1423,8 +1441,12 @@ public static class Diagnostics
             DetailsWindow panel = new DetailsWindow();
             panel.SetPreviewMetrics(new UsageMetrics
             {
+                HasFiveHour = true,
+                FiveHourUsedPercent = 21,
+                FiveHourResetUtc = DateTime.Today.AddHours(14)
+                    .AddMinutes(58).ToUniversalTime(),
                 HasWeekly = true,
-                WeeklyUsedPercent = 76,
+                WeeklyUsedPercent = 27,
                 WeeklyResetUtc = DateTime.Today.AddDays(3).AddHours(9)
                     .AddMinutes(36).ToUniversalTime(),
                 ContextInputTokens = 202600,

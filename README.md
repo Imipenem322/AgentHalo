@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.15.0-14B8A6?style=flat-square" alt="Version 0.15.0">
+  <img src="https://img.shields.io/badge/version-0.15.1-14B8A6?style=flat-square" alt="Version 0.15.1">
   <img src="https://img.shields.io/badge/license-MIT-2563EB?style=flat-square" alt="MIT License">
   <img src="https://img.shields.io/badge/Windows-Codex%20only-0078D4?style=flat-square&logo=windows" alt="Windows Codex only">
   <img src="https://img.shields.io/badge/macOS-13%2B-000000?style=flat-square&logo=apple" alt="macOS 13 or later">
@@ -36,8 +36,8 @@ desktop halo idea, then reshapes the app around a smaller Codex-only workflow:
   components were removed from this personalized branch.
 - The Windows hover panel is simplified for Codex usage, context, model, and
   current-turn token information.
-- Official Codex OAuth quota is shown only when that data is available; custom
-  providers do not display fabricated quota rows.
+- Official Codex OAuth mode shows the independent 5-hour and weekly quota
+  windows when available; custom providers do not display fabricated quota rows.
 - Normal completed-task green stays visible for up to five minutes, then falls
   back to Standby if Codex is still running or Offline if Codex exits.
 - New thinking, working, attention, and error states immediately replace an old
@@ -136,8 +136,8 @@ The same platform checks run in
 ## Desktop Behavior
 
 - Drag the halo to move it; it snaps gently to display edges.
-- Hover on Windows to inspect Codex state, context, quota, model, and current
-  turn token details.
+- Hover on Windows to inspect Codex state, context, independent 5-hour and
+  weekly quotas, model, and current turn token details.
 - Click the halo to bring Codex forward.
 - Right-click for pause, startup, preview, size, reset-position, and exit
   controls.
