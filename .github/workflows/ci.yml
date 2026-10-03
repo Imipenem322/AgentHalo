@@ -6,11 +6,17 @@ on:
       - 'src/**'
       - 'scripts/**'
       - '.github/workflows/**'
+      - 'README.md'
+      - 'README.zh-CN.md'
+      - 'docs/DEEPSEEK_HARNESS_INTEGRATION.zh-CN.md'
   pull_request:
     paths:
       - 'src/**'
       - 'scripts/**'
       - '.github/workflows/**'
+      - 'README.md'
+      - 'README.zh-CN.md'
+      - 'docs/DEEPSEEK_HARNESS_INTEGRATION.zh-CN.md'
 
 jobs:
   shared:

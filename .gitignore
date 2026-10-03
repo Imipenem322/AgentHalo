@@ -23,6 +23,11 @@ Desktop.ini
 __pycache__/
 *.pyc
 
+# Local design notes and review reports
+/docs/CODE_REDUNDANCY_REVIEW_2026-10-03.zh-CN.md
+/docs/DEEPSEEK_HARNESS_COMPATIBILITY_ASSESSMENT.zh-CN.md
+/docs/DEEPSEEK_HARNESS_INTEGRATION_DESIGN.zh-CN.md
+
 # Local agent and worktree state
 .agents/
 .codex/environments/
