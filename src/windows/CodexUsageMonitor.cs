@@ -65,8 +65,10 @@ public sealed class CodexUsageMonitor : IDisposable
         private string remoteAccountKey;
         private DateTime lastAttemptUtc;
         private DateTime cooldownUntilUtc;
-        private bool refreshInFlight;
-        private bool localRefreshInFlight;
+        private long refreshInFlightEpoch;
+        private long localRefreshInFlightEpoch;
+        private long activationEpoch;
+        private bool active;
         private bool disposed;
         private CodexUsageDataStatus status = CodexUsageDataStatus.NoData;
 
@@ -75,16 +77,69 @@ public sealed class CodexUsageMonitor : IDisposable
             get { return lazyInstance.Value; }
         }
 
+        internal static bool InstanceCreatedForDiagnostics
+        {
+            get { return lazyInstance.IsValueCreated; }
+        }
+
         public event Action Updated;
+        public event Action<long> UpdatedForActivation;
 
         private CodexUsageMonitor()
         {
             serializer.MaxJsonLength = Int32.MaxValue;
             LoadMatchingCache();
             refreshTimer = new Timer(delegate { RequestRefresh(); }, null,
-                TimeSpan.Zero, RefreshInterval);
+                Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
             localSnapshotTimer = new Timer(delegate { RequestLocalRefresh(); }, null,
-                TimeSpan.Zero, TimeSpan.FromSeconds(3));
+                Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
+        }
+
+        public long Activate()
+        {
+            lock (gate)
+            {
+                if (disposed)
+                {
+                    return 0;
+                }
+                if (active)
+                {
+                    return activationEpoch;
+                }
+                activationEpoch = NextEpoch(activationEpoch);
+                active = true;
+                lastAttemptUtc = DateTime.MinValue;
+                refreshTimer.Change(TimeSpan.Zero, RefreshInterval);
+                localSnapshotTimer.Change(TimeSpan.Zero, TimeSpan.FromSeconds(3));
+                return activationEpoch;
+            }
+        }
+
+        public void Deactivate()
+        {
+            Deactivate(0);
+        }
+
+        public void Deactivate(long expectedEpoch)
+        {
+            lock (gate)
+            {
+                if (disposed || !active)
+                {
+                    return;
+                }
+                if (expectedEpoch != 0 && expectedEpoch != activationEpoch)
+                {
+                    return;
+                }
+                active = false;
+                activationEpoch = NextEpoch(activationEpoch);
+                refreshTimer.Change(Timeout.InfiniteTimeSpan,
+                    Timeout.InfiniteTimeSpan);
+                localSnapshotTimer.Change(Timeout.InfiniteTimeSpan,
+                    Timeout.InfiniteTimeSpan);
+            }
         }
 
         public CodexUsageDataStatus Status
@@ -110,12 +165,22 @@ public sealed class CodexUsageMonitor : IDisposable
             {
                 lock (gate)
                 {
-                    return refreshInFlight || localRefreshInFlight;
+                    return active &&
+                        (refreshInFlightEpoch == activationEpoch ||
+                         localRefreshInFlightEpoch == activationEpoch);
                 }
             }
         }
 
         public bool TryRead(out UsageMetrics metrics)
+        {
+            bool hasMetrics = TryReadCached(out metrics);
+            RequestLocalRefresh();
+            RequestRefresh();
+            return hasMetrics;
+        }
+
+        public bool TryReadCached(out UsageMetrics metrics)
         {
             UsageMetrics local = null;
             UsageMetrics remote = null;
@@ -131,17 +196,18 @@ public sealed class CodexUsageMonitor : IDisposable
                 }
             }
             metrics = Merge(local, remote, DateTime.UtcNow);
-            RequestLocalRefresh();
-            RequestRefresh();
             return HasAny(metrics);
         }
 
         public void RequestRefresh()
         {
+            long requestEpoch;
             lock (gate)
             {
                 DateTime now = DateTime.UtcNow;
-                if (disposed || refreshInFlight || now < cooldownUntilUtc)
+                if (disposed || !active ||
+                    refreshInFlightEpoch == activationEpoch ||
+                    now < cooldownUntilUtc)
                 {
                     return;
                 }
@@ -151,13 +217,18 @@ public sealed class CodexUsageMonitor : IDisposable
                     return;
                 }
                 lastAttemptUtc = now;
-                refreshInFlight = true;
+                requestEpoch = activationEpoch;
+                refreshInFlightEpoch = requestEpoch;
             }
-            ThreadPool.QueueUserWorkItem(delegate { RefreshWorker(); });
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                RefreshWorker(requestEpoch);
+            });
         }
 
         internal void RequestRefreshForTest()
         {
+            Activate();
             lock (gate)
             {
                 lastAttemptUtc = DateTime.MinValue;
@@ -174,6 +245,8 @@ public sealed class CodexUsageMonitor : IDisposable
                 {
                     return;
                 }
+                active = false;
+                activationEpoch = NextEpoch(activationEpoch);
                 disposed = true;
             }
             refreshTimer.Dispose();
@@ -182,13 +255,16 @@ public sealed class CodexUsageMonitor : IDisposable
 
         private void RequestLocalRefresh()
         {
+            long requestEpoch;
             lock (gate)
             {
-                if (disposed || localRefreshInFlight)
+                if (disposed || !active ||
+                    localRefreshInFlightEpoch == activationEpoch)
                 {
                     return;
                 }
-                localRefreshInFlight = true;
+                requestEpoch = activationEpoch;
+                localRefreshInFlightEpoch = requestEpoch;
             }
             ThreadPool.QueueUserWorkItem(delegate
             {
@@ -199,8 +275,11 @@ public sealed class CodexUsageMonitor : IDisposable
                     RateLimitReader.TryRead(out parsed);
                     lock (gate)
                     {
-                        changed = !MetricsEqual(localMetrics, parsed);
-                        localMetrics = Clone(parsed);
+                        if (IsActiveEpochLocked(requestEpoch))
+                        {
+                            changed = !MetricsEqual(localMetrics, parsed);
+                            localMetrics = Clone(parsed);
+                        }
                     }
                 }
                 catch
@@ -210,52 +289,82 @@ public sealed class CodexUsageMonitor : IDisposable
                 {
                     lock (gate)
                     {
-                        localRefreshInFlight = false;
+                        if (localRefreshInFlightEpoch == requestEpoch)
+                        {
+                            localRefreshInFlightEpoch = 0;
+                        }
                     }
                     if (changed)
                     {
-                        RaiseUpdated();
+                        RaiseUpdated(requestEpoch);
                     }
                 }
             });
         }
 
-        private void RefreshWorker()
+        private void RefreshWorker(long requestEpoch)
         {
             bool notify = false;
             bool retryForChangedCredentials = false;
             try
             {
+                if (!IsActiveEpoch(requestEpoch))
+                {
+                    return;
+                }
                 CodexOAuthAccess access = CodexAuthStore.Resolve();
                 if (access == null)
                 {
                     lock (gate)
                     {
-                        status = CodexUsageDataStatus.ApiKey;
-                        remoteMetrics = null;
-                        remoteAccountKey = null;
+                        if (IsActiveEpochLocked(requestEpoch))
+                        {
+                            status = CodexUsageDataStatus.ApiKey;
+                            remoteMetrics = null;
+                            remoteAccountKey = null;
+                            notify = true;
+                        }
                     }
-                    notify = true;
                     return;
                 }
 
-                LoadCacheForAccess(access);
+                LoadCacheForAccess(access, requestEpoch);
+                if (!IsActiveEpoch(requestEpoch))
+                {
+                    return;
+                }
                 if (CodexAuthStore.NeedsRefresh(access, DateTime.UtcNow))
                 {
                     string previousAccountKey = access.AccountKey;
                     access = RefreshAccess(access);
+                    if (!IsActiveEpoch(requestEpoch))
+                    {
+                        return;
+                    }
                     CodexUsageSnapshotCache.Migrate(previousAccountKey,
                         access.AccountKey);
                 }
 
                 CodexUsageHttpResponse response = FetchUsage(access);
+                if (!IsActiveEpoch(requestEpoch))
+                {
+                    return;
+                }
                 if (response.StatusCode == 401)
                 {
                     string previousAccountKey = access.AccountKey;
                     access = RefreshAccess(access);
+                    if (!IsActiveEpoch(requestEpoch))
+                    {
+                        return;
+                    }
                     CodexUsageSnapshotCache.Migrate(previousAccountKey,
                         access.AccountKey);
                     response = FetchUsage(access);
+                    if (!IsActiveEpoch(requestEpoch))
+                    {
+                        return;
+                    }
                 }
                 if (response.StatusCode == 401)
                 {
@@ -267,10 +376,13 @@ public sealed class CodexUsageMonitor : IDisposable
                         DateTime.UtcNow) ?? DateTime.UtcNow.Add(RefreshInterval);
                     lock (gate)
                     {
-                        cooldownUntilUtc = retryAt;
-                        MarkStaleLocked();
+                        if (IsActiveEpochLocked(requestEpoch))
+                        {
+                            cooldownUntilUtc = retryAt;
+                            MarkStaleLocked();
+                            notify = true;
+                        }
                     }
-                    notify = true;
                     return;
                 }
                 if (response.StatusCode < 200 || response.StatusCode >= 300)
@@ -280,6 +392,10 @@ public sealed class CodexUsageMonitor : IDisposable
                 }
 
                 CodexOAuthAccess current = CodexAuthStore.Reload(access.SourcePath);
+                if (!IsActiveEpoch(requestEpoch))
+                {
+                    return;
+                }
                 if (current == null || !String.Equals(current.SourceVersion,
                     access.SourceVersion, StringComparison.Ordinal))
                 {
@@ -294,47 +410,69 @@ public sealed class CodexUsageMonitor : IDisposable
                     throw new InvalidDataException("invalid usage response");
                 }
                 DateTime refreshedAt = DateTime.UtcNow;
+                if (!IsActiveEpoch(requestEpoch))
+                {
+                    return;
+                }
                 CodexUsageSnapshotCache.Store(access.AccountKey, mapped, refreshedAt);
                 lock (gate)
                 {
-                    remoteMetrics = Clone(mapped);
-                    remoteRefreshedUtc = refreshedAt;
-                    remoteAccountKey = access.AccountKey;
-                    status = CodexUsageDataStatus.Fresh;
-                    cooldownUntilUtc = DateTime.MinValue;
+                    if (IsActiveEpochLocked(requestEpoch))
+                    {
+                        remoteMetrics = Clone(mapped);
+                        remoteRefreshedUtc = refreshedAt;
+                        remoteAccountKey = access.AccountKey;
+                        status = CodexUsageDataStatus.Fresh;
+                        cooldownUntilUtc = DateTime.MinValue;
+                        notify = true;
+                    }
                 }
-                notify = true;
             }
             catch (Exception ex)
             {
                 lock (gate)
                 {
-                    if (String.Equals(ex.Message, "sign-in-required",
-                        StringComparison.Ordinal))
+                    if (IsActiveEpochLocked(requestEpoch))
                     {
-                        status = CodexUsageDataStatus.SignInAgain;
-                    }
-                    else
-                    {
-                        MarkStaleLocked();
+                        if (String.Equals(ex.Message, "sign-in-required",
+                            StringComparison.Ordinal))
+                        {
+                            status = CodexUsageDataStatus.SignInAgain;
+                        }
+                        else
+                        {
+                            MarkStaleLocked();
+                        }
+                        notify = true;
                     }
                 }
-                SettingsStorage.Log("Codex usage refresh failed: " + SafeError(ex));
-                notify = true;
+                if (notify)
+                {
+                    SettingsStorage.Log("Codex usage refresh failed: " +
+                        SafeError(ex));
+                }
             }
             finally
             {
                 lock (gate)
                 {
-                    refreshInFlight = false;
-                    if (retryForChangedCredentials)
+                    if (refreshInFlightEpoch == requestEpoch)
+                    {
+                        refreshInFlightEpoch = 0;
+                    }
+                    if (retryForChangedCredentials &&
+                        IsActiveEpochLocked(requestEpoch))
                     {
                         lastAttemptUtc = DateTime.MinValue;
+                    }
+                    else if (!IsActiveEpochLocked(requestEpoch))
+                    {
+                        retryForChangedCredentials = false;
                     }
                 }
                 if (notify)
                 {
-                    RaiseUpdated();
+                    RaiseUpdated(requestEpoch);
                 }
                 if (retryForChangedCredentials)
                 {
@@ -360,8 +498,19 @@ public sealed class CodexUsageMonitor : IDisposable
 
         private void LoadCacheForAccess(CodexOAuthAccess access)
         {
+            LoadCacheForAccess(access, 0);
+        }
+
+        private void LoadCacheForAccess(CodexOAuthAccess access,
+            long expectedEpoch)
+        {
             lock (gate)
             {
+                if (expectedEpoch != 0 &&
+                    !IsActiveEpochLocked(expectedEpoch))
+                {
+                    return;
+                }
                 if (remoteMetrics != null && String.Equals(remoteAccountKey,
                     access.AccountKey, StringComparison.Ordinal))
                 {
@@ -377,6 +526,11 @@ public sealed class CodexUsageMonitor : IDisposable
             }
             lock (gate)
             {
+                if (expectedEpoch != 0 &&
+                    !IsActiveEpochLocked(expectedEpoch))
+                {
+                    return;
+                }
                 remoteMetrics = cached;
                 remoteRefreshedUtc = refreshedAt;
                 remoteAccountKey = access.AccountKey;
@@ -642,9 +796,48 @@ public sealed class CodexUsageMonitor : IDisposable
                 left.ContextWindowTokens == right.ContextWindowTokens;
         }
 
-        private void RaiseUpdated()
+        private bool IsActiveEpoch(long expectedEpoch)
         {
-            Action handler = Updated;
+            lock (gate)
+            {
+                return IsActiveEpochLocked(expectedEpoch);
+            }
+        }
+
+        private bool IsActiveEpochLocked(long expectedEpoch)
+        {
+            return !disposed && active && expectedEpoch != 0 &&
+                activationEpoch == expectedEpoch;
+        }
+
+        private static long NextEpoch(long value)
+        {
+            return value == Int64.MaxValue ? 1 : value + 1;
+        }
+
+        private void RaiseUpdated(long expectedEpoch)
+        {
+            Action handler;
+            Action<long> scopedHandler;
+            lock (gate)
+            {
+                if (!IsActiveEpochLocked(expectedEpoch))
+                {
+                    return;
+                }
+                handler = Updated;
+                scopedHandler = UpdatedForActivation;
+            }
+            if (scopedHandler != null)
+            {
+                try
+                {
+                    scopedHandler(expectedEpoch);
+                }
+                catch
+                {
+                }
+            }
             if (handler != null)
             {
                 try

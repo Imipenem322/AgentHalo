@@ -30,7 +30,8 @@ namespace CodexHalo
 {
 public enum AgentKind
     {
-        Codex
+        Codex = 0,
+        DeepSeekHarness = 2
     }
 
 public enum AgentPresenceState
@@ -67,10 +68,11 @@ public enum AgentActivityKind
 
 public enum AgentEvidenceSource
     {
-        None,
-        Process,
-        SessionJsonl,
-        DiagnosticSqlite
+        None = 0,
+        Process = 1,
+        SessionJsonl = 2,
+        DiagnosticSqlite = 3,
+        DeepSeekHarnessBridge = 5
     }
 
 public enum AgentAttentionReason
@@ -95,6 +97,7 @@ public sealed class SessionSnapshot
     {
         public string ThreadId;
         public string ProjectName;
+        public string TaskTitle;
         public string WorkingDirectory;
         public HaloState State;
         public string Action;

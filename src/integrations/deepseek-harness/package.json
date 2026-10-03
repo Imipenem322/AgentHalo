@@ -1,0 +1,12 @@
+{
+  "name": "agenthalo-deepseek-harness-observer",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./index.mjs",
+  "files": [
+    "index.mjs",
+    "package.json",
+    "cordis.patch.yml"
+  ]
+}

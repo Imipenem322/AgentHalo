@@ -44,7 +44,9 @@ public sealed class HaloWindow : Window
         private static readonly TimeSpan RuntimeStateRefreshInterval =
             TimeSpan.FromSeconds(1);
         private readonly HaloSettings settings;
-        private readonly CodexSessionMonitor monitor;
+        private readonly AgentProviderCatalog providerCatalog;
+        private readonly AgentMonitorCoordinator coordinator;
+        private readonly DeepSeekHarnessSetup deepSeekSetup;
         private readonly HaloVisual visual;
         private readonly DetailsWindow details;
         private readonly Forms.NotifyIcon tray;
@@ -53,10 +55,12 @@ public sealed class HaloWindow : Window
         private readonly DispatcherTimer performanceTimer;
         private AggregateSnapshot aggregate;
         private AggregateSnapshot displayAggregate;
+        private AgentProviderSnapshot providerSnapshot;
         private MediaPoint dragStart;
         private MediaPoint windowStart;
         private bool dragging;
         private bool moved;
+        private bool closing;
         private HaloState? demoState;
         private ErrorPresentation? demoErrorPresentation;
         private bool codexWasForeground;
@@ -66,12 +70,26 @@ public sealed class HaloWindow : Window
         private DateTime activeErrorUtc;
         private DateTime errorDimmedUtc;
         private DateTime nextRuntimeStateRefreshUtc = DateTime.MinValue;
+        private DateTime nextDeepSeekSetupUtc = DateTime.MinValue;
+        private string deepSeekSetupError;
         private ErrorPresentation errorPresentation = ErrorPresentation.Flashing;
 
         public HaloWindow(HaloSettings appSettings)
+            : this(appSettings, null)
+        {
+        }
+
+        internal HaloWindow(HaloSettings appSettings,
+            DeepSeekHarnessSetup automaticDeepSeekSetup)
         {
             settings = appSettings;
+            deepSeekSetup = automaticDeepSeekSetup;
             ConfigureLocalization(settings);
+            providerCatalog = new AgentProviderCatalog();
+            if (settings.NormalizeAgentSelection(providerCatalog))
+            {
+                SettingsStorage.Save(settings);
+            }
             double initialSize = SizeForScale(settings.HaloScalePercent);
             Width = initialSize;
             Height = initialSize;
@@ -98,9 +116,15 @@ public sealed class HaloWindow : Window
             hitSurface.Children.Add(centerHitSurface);
             hitSurface.Children.Add(visual);
             Content = hitSurface;
+            AgentKind initialFocus = providerCatalog.ParseOrDefault(
+                settings.FocusedAgent);
             details = new DetailsWindow();
-            monitor = new CodexSessionMonitor();
-            monitor.Changed += delegate { RefreshState(); };
+            details.SetEnabledAgentDescriptors(EnabledAgentDescriptors());
+            details.SetAgentSwitchingEnabled(!settings.Paused);
+            details.AgentFocusRequested += RequestFocusedAgent;
+            coordinator = new AgentMonitorCoordinator(providerCatalog,
+                initialFocus);
+            coordinator.Changed += OnCoordinatorChanged;
             foregroundTimer = new DispatcherTimer(DispatcherPriority.Background);
             foregroundTimer.Interval = TimeSpan.FromMilliseconds(300);
             foregroundTimer.Tick += OnForegroundTick;
@@ -178,6 +202,57 @@ public sealed class HaloWindow : Window
             };
         }
 
+        private void OnCoordinatorChanged(object sender,
+            AgentCoordinatorChangedEventArgs e)
+        {
+            if (closing || e == null)
+            {
+                return;
+            }
+            Action apply = delegate
+            {
+                if (closing || !coordinator.IsCurrentGeneration(e.Kind,
+                        e.Generation))
+                {
+                    return;
+                }
+                try
+                {
+                    if (e.FocusChanged)
+                    {
+                        ResetFocusedAgentPresentation();
+                        BuildTrayMenu();
+                    }
+                    RefreshState();
+                }
+                catch (Exception ex)
+                {
+                    SettingsStorage.Log("Agent UI refresh failed: " +
+                        ex.Message);
+                }
+            };
+            if (Dispatcher.CheckAccess())
+            {
+                apply();
+            }
+            else if (!Dispatcher.HasShutdownStarted)
+            {
+                Dispatcher.BeginInvoke(apply);
+            }
+        }
+
+        private void ResetFocusedAgentPresentation()
+        {
+            aggregate = null;
+            displayAggregate = null;
+            providerSnapshot = null;
+            activeErrorUtc = DateTime.MinValue;
+            errorDimmedUtc = DateTime.MinValue;
+            errorPresentation = ErrorPresentation.Flashing;
+            codexWasForeground = coordinator.IsForeground(
+                GetForegroundWindow());
+        }
+
         public static bool IsValidScalePercent(int value)
         {
             return HaloScalePresets.Contains(value);
@@ -235,10 +310,11 @@ public sealed class HaloWindow : Window
         {
             RestorePosition();
             RecoverHaloIfOffscreen();
-            monitor.Start();
+            coordinator.Start();
+            CheckDeepSeekSetup(DateTime.UtcNow);
             RefreshState();
             IntPtr foregroundHandle = GetForegroundWindow();
-            codexWasForeground = IsCodexForeground(foregroundHandle);
+            codexWasForeground = coordinator.IsForeground(foregroundHandle);
             CheckAndRestoreTopmost(foregroundHandle, true);
             foregroundTimer.Start();
             if (performanceTimer != null)
@@ -272,20 +348,73 @@ public sealed class HaloWindow : Window
             }
         }
 
+        private void CheckDeepSeekSetup(DateTime now)
+        {
+            if (deepSeekSetup == null || settings.Paused ||
+                deepSeekSetup.Ready && settings.DeepSeekHarnessSetupComplete ||
+                now < nextDeepSeekSetupUtc)
+            {
+                return;
+            }
+            nextDeepSeekSetupUtc = now.AddSeconds(5);
+            if (deepSeekSetup.TryInstall())
+            {
+                string previousFocus = settings.FocusedAgent;
+                bool previouslyEnabled = settings.IsAgentEnabled(
+                    AgentKind.DeepSeekHarness);
+                if (DeepSeekHarnessSetup.EnableMonitoring(settings))
+                {
+                    AgentKind target = providerCatalog.ParseOrDefault(
+                        settings.FocusedAgent);
+                    // Let the coordinator commit focus and persist it together.
+                    settings.FocusedAgent = previousFocus;
+                    if (target == coordinator.FocusedKind)
+                        SettingsStorage.Save(settings);
+                    else
+                        RequestFocusedAgent(target);
+                    if (coordinator.FocusedKind != target)
+                    {
+                        settings.DeepSeekHarnessSetupComplete = false;
+                        if (!previouslyEnabled)
+                            settings.EnabledAgents.Remove("deepseek-harness");
+                    }
+                    details.SetEnabledAgentDescriptors(EnabledAgentDescriptors());
+                    BuildTrayMenu();
+                }
+                return;
+            }
+            if (!String.IsNullOrEmpty(deepSeekSetup.Error) &&
+                deepSeekSetupError != deepSeekSetup.Error)
+            {
+                deepSeekSetupError = deepSeekSetup.Error;
+                tray.ShowBalloonTip(8000, "Agent Halo",
+                    L10n.Instance.Format("deepseek.setup.error",
+                        deepSeekSetupError), Forms.ToolTipIcon.Warning);
+            }
+        }
+
         private void OnForegroundTick(object sender, EventArgs e)
         {
             DateTime now = DateTime.UtcNow;
+            CheckDeepSeekSetup(now);
             IntPtr foregroundHandle = GetForegroundWindow();
-            bool codexIsForeground = IsCodexForeground(foregroundHandle);
             CheckAndRestoreTopmost(foregroundHandle, false);
-            if (codexIsForeground && !codexWasForeground && !demoState.HasValue &&
+            if (settings.Paused)
+            {
+                codexWasForeground = false;
+                return;
+            }
+            bool focusedAgentIsForeground = coordinator.IsForeground(
+                foregroundHandle);
+            if (focusedAgentIsForeground && !codexWasForeground &&
+                !demoState.HasValue &&
                 aggregate != null && aggregate.State == HaloState.Done)
             {
                 AcknowledgeCompleted();
             }
             if (aggregate != null && aggregate.State == HaloState.Error)
             {
-                if (codexIsForeground)
+                if (focusedAgentIsForeground)
                 {
                     errorPresentation = ErrorPresentation.Bright;
                 }
@@ -299,43 +428,14 @@ public sealed class HaloWindow : Window
             // session expires without a new lifecycle event. Re-evaluate the
             // aggregate periodically so both transitions reach the halo.
             if (ShouldRefreshRuntimeState(
-                    codexIsForeground != codexWasForeground,
+                    focusedAgentIsForeground != codexWasForeground,
                     errorPresentation == ErrorPresentation.Dim,
                     now,
                     nextRuntimeStateRefreshUtc))
             {
                 RefreshState();
             }
-            codexWasForeground = codexIsForeground;
-        }
-
-        private static bool IsCodexForeground()
-        {
-            return IsCodexForeground(GetForegroundWindow());
-        }
-
-        private static bool IsCodexForeground(IntPtr handle)
-        {
-            try
-            {
-                if (handle == IntPtr.Zero)
-                {
-                    return false;
-                }
-                uint processId;
-                GetWindowThreadProcessId(handle, out processId);
-                using (Process process = Process.GetProcessById((int)processId))
-                {
-                    return process.ProcessName.IndexOf("codex",
-                               StringComparison.OrdinalIgnoreCase) >= 0 ||
-                           process.MainWindowTitle.IndexOf("codex",
-                               StringComparison.OrdinalIgnoreCase) >= 0;
-                }
-            }
-            catch
-            {
-                return false;
-            }
+            codexWasForeground = focusedAgentIsForeground;
         }
 
         private void OnSourceInitialized(object sender, EventArgs e)
@@ -422,40 +522,15 @@ public sealed class HaloWindow : Window
 
         private void RefreshState()
         {
-            bool codexRunning = CodexRuntimeReader.IsRunning();
-            aggregate = monitor.GetAggregate(settings, codexRunning);
-            nextRuntimeStateRefreshUtc = NextRuntimeStateRefreshUtc(DateTime.UtcNow);
-            string appFailure;
-            DateTime appFailureUtc;
-            if (codexRunning && aggregate.Presence == AgentPresenceState.Standby &&
-                CodexFailureReader.TryReadRecent(out appFailure, out appFailureUtc) &&
-                appFailureUtc > settings.GetAcknowledgedErrorUtc())
+            if (closing)
             {
-                aggregate.State = HaloState.Error;
-                aggregate.Label = CodexSessionMonitor.StateLabel(HaloState.Error);
-                aggregate.Detail = appFailure;
-                aggregate.TurnPhase = AgentTurnPhase.Failed;
-                aggregate.Activity = AgentActivityKind.None;
-                aggregate.EvidenceSource = AgentEvidenceSource.DiagnosticSqlite;
-                aggregate.EvidenceKind = "application_failure";
-                aggregate.AttentionReason = AgentAttentionReason.None;
-                aggregate.FailureSeverity = AgentFailureSeverity.TransientApplication;
-                aggregate.Sessions.Add(new SessionSnapshot
-                {
-                    ThreadId = "codex-app",
-                    ProjectName = "Codex",
-                    Agent = AgentKind.Codex,
-                    State = HaloState.Error,
-                    Action = appFailure,
-                    LastEventUtc = appFailureUtc,
-                    Active = false,
-                    TurnPhase = AgentTurnPhase.Failed,
-                    Activity = AgentActivityKind.None,
-                    EvidenceSource = AgentEvidenceSource.DiagnosticSqlite,
-                    EvidenceKind = "application_failure",
-                    FailureSeverity = AgentFailureSeverity.TransientApplication
-                });
+                return;
             }
+            DateTime nowUtc = DateTime.UtcNow;
+            providerSnapshot = coordinator.Read(settings, nowUtc);
+            aggregate = providerSnapshot.Aggregate;
+            bool codexRunning = aggregate.Presence != AgentPresenceState.Offline;
+            nextRuntimeStateRefreshUtc = NextRuntimeStateRefreshUtc(nowUtc);
             if (aggregate.State == HaloState.Error)
             {
                 DateTime previousErrorUtc = activeErrorUtc;
@@ -469,16 +544,32 @@ public sealed class HaloWindow : Window
                         return session.LastEventUtc;
                     }).FirstOrDefault();
                 activeErrorUtc = latestError == null ? DateTime.UtcNow : latestError.LastEventUtc;
-                if (activeErrorUtc <= settings.GetAcknowledgedErrorUtc())
+                if (activeErrorUtc <= settings.GetAcknowledgedErrorUtc(
+                        aggregate.FocusedAgent))
                 {
-                    SetCodexIdlePresentation(aggregate, codexRunning);
+                    if (aggregate.FocusedAgent == AgentKind.DeepSeekHarness)
+                    {
+                        errorPresentation = ErrorPresentation.Flashing;
+                        errorDimmedUtc = DateTime.MinValue;
+                        providerSnapshot = coordinator.Read(settings, nowUtc);
+                        aggregate = providerSnapshot.Aggregate;
+                        codexRunning = aggregate.Presence !=
+                            AgentPresenceState.Offline;
+                        nextRuntimeStateRefreshUtc =
+                            NextRuntimeStateRefreshUtc(nowUtc);
+                    }
+                    else
+                    {
+                        SetCodexIdlePresentation(aggregate, codexRunning);
+                    }
                 }
                 else if (activeErrorUtc > previousErrorUtc)
                 {
-                    errorPresentation = IsCodexForeground()
+                    errorPresentation = coordinator.IsForeground(
+                        GetForegroundWindow())
                         ? ErrorPresentation.Bright : ErrorPresentation.Flashing;
                 }
-                else if (IsCodexForeground())
+                else if (coordinator.IsForeground(GetForegroundWindow()))
                 {
                     errorPresentation = ErrorPresentation.Bright;
                 }
@@ -490,10 +581,25 @@ public sealed class HaloWindow : Window
             if (errorPresentation == ErrorPresentation.Dim &&
                 DateTime.UtcNow - errorDimmedUtc >= TimeSpan.FromMinutes(1))
             {
-                settings.AcknowledgedErrorAt = activeErrorUtc.ToString("o");
+                settings.AcknowledgeError(aggregate.FocusedAgent,
+                    activeErrorUtc);
                 SettingsStorage.Save(settings);
                 errorPresentation = ErrorPresentation.Flashing;
-                SetCodexIdlePresentation(aggregate, codexRunning);
+                if (aggregate.FocusedAgent == AgentKind.DeepSeekHarness)
+                {
+                    errorDimmedUtc = DateTime.MinValue;
+                    DateTime rereadUtc = DateTime.UtcNow;
+                    providerSnapshot = coordinator.Read(settings, rereadUtc);
+                    aggregate = providerSnapshot.Aggregate;
+                    codexRunning = aggregate.Presence !=
+                        AgentPresenceState.Offline;
+                    nextRuntimeStateRefreshUtc =
+                        NextRuntimeStateRefreshUtc(rereadUtc);
+                }
+                else
+                {
+                    SetCodexIdlePresentation(aggregate, codexRunning);
+                }
             }
             if (demoState.HasValue)
             {
@@ -511,9 +617,23 @@ public sealed class HaloWindow : Window
             visual.SetAnswerStreaming(false);
             AggregateSnapshot codexDisplayAggregate = aggregate;
             displayAggregate = codexDisplayAggregate;
+            providerSnapshot.Aggregate = codexDisplayAggregate;
             tray.Text = ("Agent Halo · " + codexDisplayAggregate.Label).Substring(0,
                 Math.Min(63, ("Agent Halo · " + codexDisplayAggregate.Label).Length));
-            details.UpdateContent(codexDisplayAggregate, monitor.GetAllRecent());
+            details.SetEnabledAgentDescriptors(EnabledAgentDescriptors());
+            details.SetAgentSwitchingEnabled(!settings.Paused);
+            if (!settings.Paused && deepSeekSetup != null &&
+                deepSeekSetup.Ready && aggregate.FocusedAgent ==
+                    AgentKind.DeepSeekHarness &&
+                providerSnapshot.Integration.State ==
+                    AgentIntegrationState.NotConfigured)
+            {
+                providerSnapshot.Details.StatusDetailKey =
+                    nowUtc - deepSeekSetup.PreparedUtc < TimeSpan.FromSeconds(15)
+                        ? "status.deepseek.connecting"
+                        : "status.deepseek.start_or_restart";
+            }
+            details.UpdateContent(providerSnapshot);
         }
 
         private static void SetCodexIdlePresentation(AggregateSnapshot snapshot,
@@ -593,7 +713,7 @@ public sealed class HaloWindow : Window
 
         private void OnDoubleClick(object sender, MouseButtonEventArgs e)
         {
-            BringCodexForward();
+            coordinator.TryActivateWindow();
             e.Handled = true;
         }
 
@@ -625,7 +745,8 @@ public sealed class HaloWindow : Window
             {
                 details.Topmost = Topmost;
             }
-            details.UpdateContent(detailsAggregate, DetailsSessions(detailsAggregate));
+            providerSnapshot.Aggregate = detailsAggregate;
+            details.UpdateContent(providerSnapshot);
             PositionDetails();
             if (!details.IsVisible)
             {
@@ -642,11 +763,6 @@ public sealed class HaloWindow : Window
                 new Action(PositionDetails));
             Dispatcher.BeginInvoke(DispatcherPriority.Render,
                 new Action(PositionDetails));
-        }
-
-        private List<SessionSnapshot> DetailsSessions(AggregateSnapshot detailsAggregate)
-        {
-            return monitor.GetAllRecent();
         }
 
         private void PositionDetails()
@@ -842,11 +958,50 @@ public sealed class HaloWindow : Window
             {
                 if (session.State == HaloState.Done)
                 {
-                    settings.Acknowledge(session.ThreadId, session.CompletedUtc);
+                    settings.Acknowledge(session.Agent, session.ThreadId,
+                        session.CompletedUtc);
                 }
             }
             SettingsStorage.Save(settings);
             RefreshState();
+        }
+
+        private IEnumerable<AgentProviderDescriptor> EnabledAgentDescriptors()
+        {
+            return providerCatalog.Descriptors.Where(
+                delegate(AgentProviderDescriptor descriptor)
+                {
+                    return settings.IsAgentEnabled(descriptor.Kind,
+                        providerCatalog);
+                }).ToList();
+        }
+
+        private void RequestFocusedAgent(AgentKind targetKind)
+        {
+            if (closing || settings.Paused ||
+                targetKind == coordinator.FocusedKind)
+            {
+                return;
+            }
+            try
+            {
+                AgentProviderSnapshot firstSnapshot;
+                bool switched = coordinator.TrySwitch(targetKind, settings,
+                    delegate
+                    {
+                        SettingsStorage.SaveAtomicOrThrow(settings);
+                        return true;
+                    }, out firstSnapshot);
+                if (!switched)
+                {
+                    SettingsStorage.Log("Agent switch was rejected: " +
+                        coordinator.LastSwitchError);
+                }
+            }
+            catch (Exception ex)
+            {
+                SettingsStorage.Log("Agent switch failed: " + ex.Message);
+            }
         }
 
         private void BuildTrayMenu()
@@ -888,10 +1043,61 @@ public sealed class HaloWindow : Window
                 Dispatcher.BeginInvoke(new Action(delegate
                 {
                     settings.Paused = pause.Checked;
+                    try
+                    {
+                        if (settings.Paused)
+                        {
+                            coordinator.Stop();
+                        }
+                        else
+                        {
+                            coordinator.Start();
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        settings.Paused = true;
+                        SettingsStorage.Log("Agent monitoring toggle failed: " +
+                            ex.Message);
+                    }
+                    details.SetAgentSwitchingEnabled(!settings.Paused);
                     RefreshState();
+                    BuildTrayMenu();
                 }));
             };
             menu.Items.Add(pause);
+
+            Forms.ToolStripMenuItem currentAgent =
+                new Forms.ToolStripMenuItem(
+                    L10n.Instance["menu.current_agent"]);
+            foreach (AgentProviderDescriptor descriptor in
+                providerCatalog.Descriptors)
+            {
+                if (!settings.IsAgentEnabled(descriptor.Kind,
+                        providerCatalog))
+                {
+                    continue;
+                }
+                AgentKind selectedKind = descriptor.Kind;
+                string agentTitle = String.IsNullOrWhiteSpace(
+                    descriptor.DisplayNameKey)
+                    ? descriptor.DisplayName
+                    : L10n.Instance[descriptor.DisplayNameKey];
+                Forms.ToolStripMenuItem agentItem =
+                    new Forms.ToolStripMenuItem(agentTitle);
+                agentItem.AccessibleRole = Forms.AccessibleRole.RadioButton;
+                agentItem.Checked = coordinator.FocusedKind == selectedKind;
+                agentItem.Enabled = !settings.Paused;
+                agentItem.Click += delegate
+                {
+                    Dispatcher.BeginInvoke(new Action(delegate
+                    {
+                        RequestFocusedAgent(selectedKind);
+                    }));
+                };
+                currentAgent.DropDownItems.Add(agentItem);
+            }
+            menu.Items.Add(currentAgent);
 
             // Language submenu
             var languageItem = new Forms.ToolStripMenuItem(L10n.Instance["menu.language"]);
@@ -954,7 +1160,12 @@ public sealed class HaloWindow : Window
                 Dispatcher.BeginInvoke(new Action(Close));
             });
             Win11MenuRenderer.Apply(menu);
+            Forms.ContextMenuStrip previousMenu = tray.ContextMenuStrip;
             tray.ContextMenuStrip = menu;
+            if (previousMenu != null)
+            {
+                previousMenu.Dispose();
+            }
         }
 
         private void AddPreviewItem(Forms.ToolStripMenuItem parent, string title,
@@ -1011,38 +1222,9 @@ public sealed class HaloWindow : Window
             L10n.Instance.SetLanguage(lang);
         }
 
-        private void BringCodexForward()
-        {
-            try
-            {
-                Process current = Process.GetCurrentProcess();
-                Process candidate = Process.GetProcesses().FirstOrDefault(delegate(Process process)
-                {
-                    try
-                    {
-                        return process.Id != current.Id && process.MainWindowHandle != IntPtr.Zero &&
-                            (process.ProcessName.IndexOf("codex", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                             process.MainWindowTitle.IndexOf("codex", StringComparison.OrdinalIgnoreCase) >= 0);
-                    }
-                    catch
-                    {
-                        return false;
-                    }
-                });
-                if (candidate != null)
-                {
-                    ShowWindow(candidate.MainWindowHandle, 9);
-                    SetForegroundWindow(candidate.MainWindowHandle);
-                }
-            }
-            catch (Exception ex)
-            {
-                SettingsStorage.Log("Bring Codex forward failed: " + ex.Message);
-            }
-        }
-
         private void OnClosing(object sender, System.ComponentModel.CancelEventArgs e)
         {
+            closing = true;
             SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
             SystemEvents.SessionSwitch -= OnSessionSwitch;
             foregroundTimer.Stop();
@@ -1052,8 +1234,10 @@ public sealed class HaloWindow : Window
                 performanceTimer.Stop();
             }
             SavePosition();
+            details.AgentFocusRequested -= RequestFocusedAgent;
+            coordinator.Changed -= OnCoordinatorChanged;
             details.Close();
-            monitor.Dispose();
+            coordinator.Dispose();
             tray.Visible = false;
             tray.Dispose();
         }
@@ -1110,17 +1294,7 @@ public sealed class HaloWindow : Window
             out UserNotificationState state);
 
         [DllImport("user32.dll")]
-        private static extern bool SetForegroundWindow(IntPtr hWnd);
-
-        [DllImport("user32.dll")]
-        private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
-
-        [DllImport("user32.dll")]
         private static extern IntPtr GetForegroundWindow();
-
-        [DllImport("user32.dll")]
-        private static extern uint GetWindowThreadProcessId(IntPtr hWnd,
-            out uint processId);
 
         [StructLayout(LayoutKind.Sequential)]
         private struct NativeRect

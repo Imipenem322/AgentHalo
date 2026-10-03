@@ -88,6 +88,17 @@ public static class Diagnostics
 
         public static int RunSelfTest(string outputPath)
         {
+            string diagnosticAppDirectory = Path.Combine(Path.GetTempPath(),
+                "AgentHalo-self-test-app-" + Guid.NewGuid().ToString("N"));
+            string previousDiagnosticDirectory =
+                Environment.GetEnvironmentVariable(
+                    "AGENTHALO_DIAGNOSTIC_APP_DIRECTORY");
+            string previousTestMode = Environment.GetEnvironmentVariable(
+                "AGENTHALO_TEST_MODE");
+            Environment.SetEnvironmentVariable("AGENTHALO_TEST_MODE", "1");
+            Environment.SetEnvironmentVariable(
+                "AGENTHALO_DIAGNOSTIC_APP_DIRECTORY",
+                diagnosticAppDirectory);
             try
             {
                 string temp = Path.Combine(Path.GetTempPath(), "codex-halo-selftest-" +
@@ -572,7 +583,7 @@ public static class Diagnostics
                     "fatal turn clears plan flag");
                 Assert(GeneratedHaloSpec.ContractVersion == 2,
                     "generated shared contract version");
-                Assert(GeneratedHaloSpec.ReleaseVersion == "0.15.1",
+                Assert(GeneratedHaloSpec.ReleaseVersion == "0.16.0",
                     "generated shared release version");
                 Assert(GeneratedHaloSpec.State(HaloState.Attention).Label == "NEEDS YOU",
                     "generated state labels");
@@ -1235,12 +1246,49 @@ public static class Diagnostics
                         watcherAggregate.EvidenceSource ==
                             AgentEvidenceSource.SessionJsonl,
                         "session watcher discovers a new active turn incrementally");
+
+                    watcherMonitor.Stop();
+                    string pausedWatcherSession = Path.Combine(watcherRoot,
+                        "rollout-paused-" + Guid.NewGuid().ToString() + ".jsonl");
+                    File.WriteAllText(pausedWatcherSession,
+                        "{\"timestamp\":\"" + DateTime.UtcNow.ToString("o") +
+                        "\",\"type\":\"session_meta\",\"payload\":{\"id\":\"watcher-paused\"," +
+                        "\"cwd\":\"C:\\\\work\\\\paused-watcher\"}}\n" +
+                        "{\"timestamp\":\"" + DateTime.UtcNow.ToString("o") +
+                        "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n",
+                        Encoding.UTF8);
+                    Thread.Sleep(400);
+                    Assert(!watcherMonitor.GetAllRecent().Any(
+                        delegate(SessionSnapshot snapshot)
+                        {
+                            return snapshot.ProjectName == "paused-watcher";
+                        }),
+                        "stopped session monitor does not consume watcher events");
+
+                    watcherMonitor.Start();
+                    DateTime resumeDeadline = DateTime.UtcNow.AddSeconds(3);
+                    bool resumedSessionFound = false;
+                    while (DateTime.UtcNow < resumeDeadline)
+                    {
+                        resumedSessionFound = watcherMonitor.GetAllRecent().Any(
+                            delegate(SessionSnapshot snapshot)
+                            {
+                                return snapshot.ProjectName == "paused-watcher";
+                            });
+                        if (resumedSessionFound) break;
+                        Thread.Sleep(50);
+                    }
+                    Assert(resumedSessionFound,
+                        "restarted session monitor performs catch-up discovery");
                 }
                 Directory.Delete(watcherRoot, true);
 
+                RunProviderCoordinatorChecks();
+                RunDeepSeekAutomaticSetupChecks();
+                RunDeepSeekIntegrationStateChecks();
                 File.Delete(temp);
                 File.WriteAllText(outputPath,
-                    "PASS\nLifecycle, topmost guard, usage metrics, panel formatting, and animation checks passed.\n",
+                    "PASS\nLifecycle, Codex and DSH provider coordination, DSH automatic setup and task details, topmost guard, usage metrics, panel formatting, and animation checks passed.\n",
                     Encoding.UTF8);
                 return 0;
             }
@@ -1248,6 +1296,146 @@ public static class Diagnostics
             {
                 File.WriteAllText(outputPath, "FAIL\n" + ex.ToString(), Encoding.UTF8);
                 return 1;
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable(
+                    "AGENTHALO_DIAGNOSTIC_APP_DIRECTORY",
+                    previousDiagnosticDirectory);
+                Environment.SetEnvironmentVariable("AGENTHALO_TEST_MODE",
+                    previousTestMode);
+                TryDeleteSelfTestAppDirectory(diagnosticAppDirectory);
+            }
+        }
+
+        private static void RunDeepSeekAutomaticSetupChecks()
+        {
+            string root = Path.Combine(SettingsStorage.AppDirectory, "deepseek-first-run");
+            string profile = Path.Combine(root, "profile");
+            string app = Path.Combine(root, "fresh user's app");
+            DeepSeekHarnessSetup setup = new DeepSeekHarnessSetup(profile, app);
+            Assert(!setup.TryInstall() && !Directory.Exists(profile),
+                "DSH setup waits for first desktop launch");
+            Directory.CreateDirectory(profile);
+            File.WriteAllText(Path.Combine(profile, "package.json"), "{}");
+            File.WriteAllText(Path.Combine(profile, "pnpm-workspace.yaml"), "packages: [.]\n");
+            string patchPath = Path.Combine(profile, "cordis.patch.yml");
+            File.WriteAllText(patchPath, "# DSH empty profile\r\n[]\r\n");
+            string profileLock = Path.Combine(profile, "lock");
+            File.WriteAllText(profileLock, "initializing");
+            Assert(!setup.TryInstall(), "DSH setup respects desktop initialization lock");
+            File.Delete(profileLock);
+            Assert(setup.TryInstall(), "DSH first-run observer installs from embedded resource");
+            string observer = Path.Combine(app, "integrations", "deepseek-harness", "observer", "index.mjs");
+            string registered = File.ReadAllText(patchPath);
+            Assert(File.Exists(observer) && File.ReadAllText(observer).Contains("export function apply(ctx)") &&
+                registered.Contains("fresh user''s app") && !registered.Contains("[]") &&
+                registered.StartsWith("# DSH empty profile\r\n"),
+                "DSH empty profile becomes valid registration with quoted local path");
+            DeepSeekHarnessSetup repeated = new DeepSeekHarnessSetup(profile, app);
+            Assert(repeated.TryInstall() && File.ReadAllText(patchPath) == registered,
+                "DSH repeated startup preserves the existing registration");
+
+            string other = "# keep my plugin\n- insert:\n    - id: my-plugin\n      name: my-module\n";
+            string old = other + "- insert:\n    - id: " + DeepSeekHarnessSetup.PluginId +
+                "\n      name: 'E:/old/index.mjs' # local observer\n" +
+                "- id: my-plugin\n  disabled: false\n";
+            string migrated = DeepSeekHarnessSetup.RegisterObserver(old, observer);
+            Assert(migrated.StartsWith(other) && migrated.EndsWith("# local observer\n- id: my-plugin\n  disabled: false\n") &&
+                !migrated.Contains("E:/old/") && DeepSeekHarnessSetup.RegisterObserver(migrated, observer) == migrated,
+                "DSH path migration preserves other plugins and comments without duplicate insert");
+            HaloSettings fresh = new HaloSettings();
+            Assert(DeepSeekHarnessSetup.EnableMonitoring(fresh) &&
+                fresh.IsAgentEnabled(AgentKind.DeepSeekHarness) &&
+                fresh.FocusedAgent == "deepseek-harness",
+                "DSH first setup enables the provider");
+            HaloSettings previouslyConfigured = new HaloSettings();
+            previouslyConfigured.EnabledAgents.Add("deepseek-harness");
+            Assert(DeepSeekHarnessSetup.EnableMonitoring(previouslyConfigured) &&
+                previouslyConfigured.FocusedAgent == "codex",
+                "DSH manual integrations retain the existing agent selection");
+            fresh.FocusedAgent = "codex";
+            fresh.EnabledAgents.Remove("deepseek-harness");
+            Assert(!DeepSeekHarnessSetup.EnableMonitoring(fresh) && fresh.FocusedAgent == "codex" &&
+                !fresh.IsAgentEnabled(AgentKind.DeepSeekHarness),
+                "DSH later startup respects the saved choice and explicit removal");
+        }
+
+        private static void RunDeepSeekIntegrationStateChecks()
+        {
+            AgentIntegrationState[] states =
+            {
+                AgentIntegrationState.NotConfigured,
+                AgentIntegrationState.NotRequired,
+                AgentIntegrationState.Healthy,
+                AgentIntegrationState.Stale,
+                AgentIntegrationState.Broken
+            };
+            DateTime lastEventUtc = DateTime.UtcNow.AddMinutes(-1);
+            for (int i = 0; i < states.Length; i++)
+            {
+                AgentIntegrationState state = states[i];
+                DeepSeekHarnessReadResult source =
+                    new DeepSeekHarnessReadResult
+                    {
+                        IntegrationState = state,
+                        StatusDetailKey = state ==
+                            AgentIntegrationState.NotConfigured
+                                ? "status.deepseek.not_configured"
+                                : "status.deepseek.unknown",
+                        LastEventUtc = lastEventUtc,
+                        Broken = state == AgentIntegrationState.Broken
+                    };
+                string selectedRootId;
+                AgentProviderSnapshot snapshot =
+                    DeepSeekHarnessSnapshotReducer.Build(source,
+                        new HaloSettings(), DateTime.UtcNow, String.Empty,
+                        out selectedRootId);
+                Assert(snapshot.Integration != null &&
+                    snapshot.Integration.State == state &&
+                    snapshot.Integration.LastEventUtc == lastEventUtc,
+                    "DSH reducer preserves integration state " +
+                        state.ToString());
+            }
+        }
+
+        private static void TryDeleteSelfTestAppDirectory(string directory)
+        {
+            try
+            {
+                string full = Path.GetFullPath(directory);
+                string temp = Path.GetFullPath(Path.GetTempPath())
+                    .TrimEnd(Path.DirectorySeparatorChar,
+                        Path.AltDirectorySeparatorChar);
+                string name = Path.GetFileName(full);
+                string parent = Path.GetDirectoryName(full);
+                bool directChild = String.Equals(parent, temp,
+                    StringComparison.OrdinalIgnoreCase);
+                bool containsReparsePoint = false;
+                if (Directory.Exists(full))
+                {
+                    DirectoryInfo root = new DirectoryInfo(full);
+                    containsReparsePoint = (root.Attributes &
+                        FileAttributes.ReparsePoint) != 0 ||
+                        root.EnumerateFileSystemInfos("*",
+                            SearchOption.AllDirectories).Any(delegate(
+                                FileSystemInfo item)
+                        {
+                            return (item.Attributes &
+                                FileAttributes.ReparsePoint) != 0;
+                        });
+                }
+                if (directChild &&
+                    name.StartsWith("AgentHalo-self-test-app-",
+                        StringComparison.Ordinal) &&
+                    name.Length == "AgentHalo-self-test-app-".Length + 32 &&
+                    Directory.Exists(full) && !containsReparsePoint)
+                {
+                    Directory.Delete(full, true);
+                }
+            }
+            catch
+            {
             }
         }
 
@@ -1290,6 +1478,1139 @@ public static class Diagnostics
         }
 
 
+        private static void RunProviderCoordinatorChecks()
+        {
+            Assert(!CodexUsageMonitor.InstanceCreatedForDiagnostics,
+                "provider checks start without the Codex usage singleton");
+            FakeAgentProvider fakeProvider = new FakeAgentProvider();
+            AgentProviderCatalog catalog = new AgentProviderCatalog(new[]
+            {
+                new AgentProviderDescriptor
+                {
+                    Kind = AgentKind.Codex,
+                    Key = "codex",
+                    DisplayName = "Codex",
+                    Order = 0,
+                    Capabilities = fakeProvider.Capabilities,
+                    CreateProvider = delegate { return fakeProvider; }
+                }
+            });
+            Assert(catalog.Descriptors.Count == 1 &&
+                catalog.Descriptors[0].Key == "codex",
+                "provider catalog owns the Codex registration");
+
+            UsageMetrics quotaMetrics = new UsageMetrics
+            {
+                HasFiveHour = true,
+                FiveHourUsedPercent = 25,
+                ContextInputTokens = 100,
+                ContextWindowTokens = 1000
+            };
+            AgentDetailsSnapshot quotaDetails =
+                CodexAgentProvider.CreateDetailsSnapshot(quotaMetrics,
+                    new CodexCustomApiMetrics { IsCustomApi = false });
+            Assert(quotaDetails.Mode == AgentDetailsMode.Quota &&
+                quotaDetails.Usage == quotaMetrics,
+                "Codex provider maps official usage to generic quota details");
+            AgentDetailsSnapshot informationDetails =
+                CodexAgentProvider.CreateDetailsSnapshot(null,
+                    new CodexCustomApiMetrics
+                    {
+                        IsCustomApi = true,
+                        ProjectName = "AgentHalo",
+                        Model = "custom-model",
+                        Provider = "Private API",
+                        InputTokens = 1200,
+                        OutputTokens = 80,
+                        ContextTokens = 1200,
+                        ContextWindowTokens = 16000
+                    });
+            Assert(informationDetails.Mode == AgentDetailsMode.Information &&
+                informationDetails.ProjectName == "AgentHalo" &&
+                informationDetails.ModelName == "custom-model" &&
+                informationDetails.ProviderName == "Private API" &&
+                informationDetails.HasContext,
+                "Codex provider maps custom API data to generic information details");
+
+            DateTime failureUtc = DateTime.UtcNow;
+            HaloSettings failureSettings = new HaloSettings();
+            AggregateSnapshot failureAggregate = new AggregateSnapshot
+            {
+                State = HaloState.Done,
+                Label = "STANDBY",
+                Presence = AgentPresenceState.Standby,
+                Sessions = new List<SessionSnapshot>()
+            };
+            CodexAgentProvider.ApplyApplicationFailure(failureAggregate,
+                failureSettings, true, true, "Application failure", failureUtc);
+            Assert(failureAggregate.State == HaloState.Error &&
+                failureAggregate.Sessions.Count == 1 &&
+                failureAggregate.Sessions[0].EvidenceSource ==
+                    AgentEvidenceSource.DiagnosticSqlite,
+                "Codex provider applies a fresh application failure");
+            failureSettings.AcknowledgedErrorAt = failureUtc.ToString("o");
+            AggregateSnapshot acknowledgedFailure = new AggregateSnapshot
+            {
+                State = HaloState.Done,
+                Label = "STANDBY",
+                Presence = AgentPresenceState.Standby,
+                Sessions = new List<SessionSnapshot>()
+            };
+            CodexAgentProvider.ApplyApplicationFailure(acknowledgedFailure,
+                failureSettings, true, true, "Application failure", failureUtc);
+            Assert(acknowledgedFailure.State == HaloState.Done &&
+                acknowledgedFailure.Sessions.Count == 0,
+                "Codex provider suppresses an acknowledged application failure");
+
+            int changedCount = 0;
+            AgentMonitorCoordinator coordinator =
+                new AgentMonitorCoordinator(catalog, AgentKind.Codex);
+            coordinator.Changed += delegate { changedCount++; };
+            coordinator.Start();
+            coordinator.Start();
+            Assert(fakeProvider.StartCount == 1,
+                "coordinator start is idempotent");
+            fakeProvider.RaiseChanged();
+            Assert(changedCount == 1,
+                "coordinator forwards one active provider callback");
+            Assert(coordinator.Refresh() && fakeProvider.RefreshCount == 1,
+                "coordinator delegates refresh");
+            AgentProviderSnapshot snapshot = coordinator.Read(
+                new HaloSettings(), DateTime.UtcNow);
+            Assert(snapshot == fakeProvider.Snapshot &&
+                fakeProvider.ReadCount == 1,
+                "coordinator returns the focused provider snapshot");
+            Assert(coordinator.IsForeground(new IntPtr(1)) &&
+                fakeProvider.ForegroundCount == 1,
+                "coordinator delegates foreground detection");
+            Assert(coordinator.TryActivateWindow() &&
+                fakeProvider.ActivateWindowCount == 1,
+                "coordinator delegates window activation");
+
+            coordinator.Stop();
+            coordinator.Stop();
+            Assert(fakeProvider.StopCount == 1,
+                "coordinator stop is idempotent");
+            fakeProvider.RaiseChanged();
+            Assert(changedCount == 1,
+                "stopped provider callback cannot refresh the UI");
+            coordinator.Start();
+            fakeProvider.RaiseChanged();
+            Assert(fakeProvider.StartCount == 2 && changedCount == 2,
+                "restart does not duplicate provider subscriptions");
+            coordinator.Dispose();
+            Assert(fakeProvider.StopCount == 2 &&
+                fakeProvider.DisposeCount == 1,
+                "coordinator disposes the provider once");
+            fakeProvider.RaiseChanged();
+            Assert(changedCount == 2,
+                "disposed coordinator detaches provider callbacks");
+
+            FakeAgentProvider flakyProvider = new FakeAgentProvider();
+            flakyProvider.StartFailuresRemaining = 1;
+            AgentMonitorCoordinator flakyCoordinator =
+                new AgentMonitorCoordinator(new AgentProviderCatalog(new[]
+                {
+                    new AgentProviderDescriptor
+                    {
+                        Kind = AgentKind.Codex,
+                        Key = "codex",
+                        DisplayName = "Codex",
+                        CreateProvider = delegate { return flakyProvider; }
+                    }
+                }), AgentKind.Codex);
+            bool startFailed = false;
+            try
+            {
+                flakyCoordinator.Start();
+            }
+            catch (InvalidOperationException)
+            {
+                startFailed = true;
+            }
+            Assert(startFailed && flakyProvider.StartCount == 1 &&
+                flakyProvider.StopCount == 1,
+                "coordinator rolls back a partially failed start");
+            flakyCoordinator.Start();
+            Assert(flakyProvider.StartCount == 2,
+                "coordinator can retry after a failed start");
+            flakyProvider.StopFailuresRemaining = 1;
+            bool stopFailed = false;
+            try
+            {
+                flakyCoordinator.Stop();
+            }
+            catch (InvalidOperationException)
+            {
+                stopFailed = true;
+            }
+            Assert(stopFailed,
+                "coordinator surfaces a provider stop failure");
+            flakyCoordinator.Start();
+            Assert(flakyProvider.StartCount == 3,
+                "coordinator can restart after a failed stop");
+            flakyCoordinator.Dispose();
+
+            RunAgentSettingsChecks();
+            RunDefaultCodexIsolationChecks();
+            RunAgentSwitchTransactionChecks();
+            RunAgentSwitchFailureChecks();
+            RunAgentSwitchStressChecks();
+            RunAgentPauseChecks();
+            RunAgentDetailsIsolationChecks();
+            Assert(!CodexUsageMonitor.InstanceCreatedForDiagnostics,
+                "provider checks remain offline and credential-free");
+        }
+
+        private static void RunAgentSettingsChecks()
+        {
+            AgentProviderCatalog catalog = new AgentProviderCatalog();
+            JavaScriptSerializer serializer = new JavaScriptSerializer();
+            Assert(catalog.Descriptors.Single(delegate(
+                    AgentProviderDescriptor descriptor)
+                {
+                    return descriptor.Kind == AgentKind.Codex;
+                }).EnabledByDefault &&
+                !catalog.Descriptors.Single(delegate(
+                    AgentProviderDescriptor descriptor)
+                {
+                    return descriptor.Kind == AgentKind.DeepSeekHarness;
+                }).EnabledByDefault,
+                "Codex is the only provider enabled by default");
+
+            HaloSettings legacy = serializer.Deserialize<HaloSettings>(
+                "{\"FocusedAgent\":\"codex\"}");
+            legacy.NormalizeAgentSelection(catalog);
+            Assert(legacy.FocusedAgent == "codex" &&
+                legacy.EnabledAgents.SequenceEqual(new[] { "codex" }) &&
+                catalog.DefaultEnabledKeys.SequenceEqual(
+                    new[] { "codex" }),
+                "old and new settings preserve Codex-only defaults");
+
+            HaloSettings invalid = new HaloSettings
+            {
+                FocusedAgent = "unknown-agent",
+                EnabledAgents = new List<string> { "unknown-agent" }
+            };
+            Assert(invalid.NormalizeAgentSelection(catalog) &&
+                invalid.FocusedAgent == "codex" &&
+                invalid.EnabledAgents.SequenceEqual(new[] { "codex" }),
+                "invalid agent settings fall back to Codex");
+
+            HaloSettings canonical = new HaloSettings
+            {
+                FocusedAgent = " DEEPSEEK-HARNESS ",
+                EnabledAgents = new List<string>
+                {
+                    " deepseek-harness ", "CODEX", "codex", "missing"
+                }
+            };
+            canonical.NormalizeAgentSelection(catalog);
+            Assert(canonical.FocusedAgent == "deepseek-harness" &&
+                canonical.EnabledAgents.SequenceEqual(new[]
+                {
+                    "codex", "deepseek-harness"
+                }), "agent settings are canonical and de-duplicated");
+
+            HaloSettings disabledFocus = new HaloSettings
+            {
+                FocusedAgent = "deepseek-harness",
+                EnabledAgents = new List<string> { "codex" }
+            };
+            disabledFocus.NormalizeAgentSelection(catalog);
+            Assert(disabledFocus.FocusedAgent == "codex",
+                "disabled focused agent falls back to the first enabled agent");
+
+            HaloSettings persisted = new HaloSettings
+            {
+                FocusedAgent = "deepseek-harness",
+                EnabledAgents = new List<string>
+                {
+                    "codex", "deepseek-harness"
+                }
+            };
+            HaloSettings restarted = serializer.Deserialize<HaloSettings>(
+                serializer.Serialize(persisted));
+            restarted.NormalizeAgentSelection(catalog);
+            Assert(restarted.FocusedAgent == "deepseek-harness",
+                "focused agent survives an in-memory restart round trip");
+
+            HaloSettings removedProvider = serializer.Deserialize<HaloSettings>(
+                "{\"FocusedAgent\":\"antigravity\",\"EnabledAgents\":[\"codex\",\"antigravity\",\"deepseek-harness\"]}");
+            removedProvider.NormalizeAgentSelection(catalog);
+            Assert(removedProvider.FocusedAgent == "codex" &&
+                removedProvider.EnabledAgents.SequenceEqual(new[]
+                {
+                    "codex", "deepseek-harness"
+                }),
+                "saved selections discard the removed provider and retain Codex and DSH");
+
+            HaloSettings remainingDeepSeek = serializer.Deserialize<HaloSettings>(
+                "{\"FocusedAgent\":\" ANTIGRAVITY \",\"EnabledAgents\":[\"deepseek-harness\"],\"DeepSeekHarnessSetupComplete\":true}");
+            remainingDeepSeek.NormalizeAgentSelection(catalog);
+            Assert(remainingDeepSeek.FocusedAgent == "deepseek-harness" &&
+                remainingDeepSeek.EnabledAgents.SequenceEqual(new[]
+                {
+                    "deepseek-harness"
+                }) && remainingDeepSeek.DeepSeekHarnessSetupComplete,
+                "retired focus preserves DSH-only monitoring and completed setup");
+
+            HaloSettings acknowledgements = new HaloSettings();
+            DateTime codexDone = DateTime.UtcNow.AddMinutes(-3);
+            DateTime deepSeekDone = DateTime.UtcNow.AddMinutes(-2);
+            acknowledgements.Acknowledge(AgentKind.Codex, "same-id",
+                codexDone);
+            acknowledgements.Acknowledge(AgentKind.DeepSeekHarness, "same-id",
+                deepSeekDone);
+            Assert(acknowledgements.GetAcknowledgedUtc(AgentKind.Codex,
+                    "same-id") == codexDone.ToUniversalTime() &&
+                acknowledgements.GetAcknowledgedUtc(
+                    AgentKind.DeepSeekHarness, "same-id") ==
+                    deepSeekDone.ToUniversalTime(),
+                "completion acknowledgements are agent scoped");
+
+            DateTime legacyDone = DateTime.UtcNow.AddMinutes(-4);
+            acknowledgements.Acknowledged["legacy-id"] =
+                legacyDone.ToUniversalTime().ToString("o");
+            Assert(acknowledgements.GetAcknowledgedUtc(AgentKind.Codex,
+                    "legacy-id") == legacyDone.ToUniversalTime() &&
+                acknowledgements.GetAcknowledgedUtc(
+                    AgentKind.DeepSeekHarness, "legacy-id") ==
+                    DateTime.MinValue,
+                "legacy completion acknowledgement only migrates to Codex");
+
+            DateTime legacyError = DateTime.UtcNow.AddMinutes(-5);
+            DateTime deepSeekError = DateTime.UtcNow.AddMinutes(-1);
+            acknowledgements.AcknowledgedErrorAt =
+                legacyError.ToUniversalTime().ToString("o");
+            acknowledgements.AcknowledgeError(AgentKind.DeepSeekHarness,
+                deepSeekError);
+            Assert(acknowledgements.GetAcknowledgedErrorUtc(
+                    AgentKind.Codex) == legacyError.ToUniversalTime() &&
+                acknowledgements.GetAcknowledgedErrorUtc(
+                    AgentKind.DeepSeekHarness) ==
+                    deepSeekError.ToUniversalTime(),
+                "error acknowledgements are agent scoped");
+        }
+
+        private static void RunDefaultCodexIsolationChecks()
+        {
+            SwitchProbe probe = new SwitchProbe();
+            SwitchingFakeAgentProvider codex;
+            SwitchingFakeAgentProvider deepSeekHarness;
+            AgentProviderCatalog catalog = CreateSwitchCatalog(probe,
+                out codex, out deepSeekHarness);
+            HaloSettings settings = new HaloSettings();
+            settings.NormalizeAgentSelection(catalog);
+            AgentMonitorCoordinator coordinator =
+                new AgentMonitorCoordinator(catalog, catalog.DefaultKind);
+            coordinator.Start();
+            AgentProviderSnapshot snapshot = coordinator.Read(settings,
+                DateTime.UtcNow);
+            Assert(catalog.DefaultKind == AgentKind.Codex &&
+                settings.FocusedAgent == "codex" &&
+                settings.EnabledAgents.SequenceEqual(new[] { "codex" }) &&
+                probe.CodexCreateCount == 1 &&
+                probe.DeepSeekHarnessCreateCount == 0 &&
+                codex.IsActive && !deepSeekHarness.IsActive &&
+                snapshot.Aggregate.FocusedAgent == AgentKind.Codex,
+                "default startup creates and reads only the Codex provider");
+            coordinator.Dispose();
+            Assert(probe.ActiveCount == 0 && codex.DisposeCount == 1 &&
+                deepSeekHarness.DisposeCount == 0,
+                "default Codex shutdown never instantiates DeepSeek Harness");
+        }
+
+        private static void RunAgentSwitchTransactionChecks()
+        {
+            SwitchProbe probe = new SwitchProbe();
+            SwitchingFakeAgentProvider codex;
+            SwitchingFakeAgentProvider deepSeekHarness;
+            AgentProviderCatalog catalog = CreateSwitchCatalog(probe,
+                out codex, out deepSeekHarness);
+            HaloSettings settings = EnabledSwitchSettings(catalog);
+            AgentMonitorCoordinator coordinator =
+                new AgentMonitorCoordinator(catalog, AgentKind.Codex);
+            List<AgentCoordinatorChangedEventArgs> changes =
+                new List<AgentCoordinatorChangedEventArgs>();
+            coordinator.Changed += delegate(object sender,
+                AgentCoordinatorChangedEventArgs e)
+            {
+                changes.Add(e);
+            };
+
+            coordinator.Start();
+            Assert(probe.ActiveCount == 1 && codex.IsActive &&
+                !deepSeekHarness.IsActive && codex.SubscriberCount == 1,
+                "coordinator starts only the focused provider");
+
+            Action delayedCodexCallback = codex.CaptureChanged();
+            codex.RaiseChanged();
+            Assert(changes.Count == 1 && !changes[0].FocusChanged &&
+                coordinator.IsCurrent(changes[0]),
+                "current provider callback carries its generation");
+            AgentCoordinatorChangedEventArgs queuedOldChange = changes[0];
+
+            probe.Sequence.Clear();
+            codex.RaiseChangedOnStop = true;
+            int persistCount = 0;
+            AgentProviderSnapshot firstSnapshot;
+            bool switched = coordinator.TrySwitch(
+                AgentKind.DeepSeekHarness, settings, DateTime.UtcNow,
+                delegate
+                {
+                    persistCount++;
+                    probe.Sequence.Add("persist");
+                    return true;
+                }, out firstSnapshot);
+            Assert(switched && persistCount == 1 &&
+                coordinator.FocusedKind == AgentKind.DeepSeekHarness &&
+                settings.FocusedAgent == "deepseek-harness" &&
+                firstSnapshot.Aggregate.FocusedAgent ==
+                    AgentKind.DeepSeekHarness,
+                "coordinator commits the candidate snapshot and focus");
+            Assert(probe.Sequence.IndexOf("codex.stop") >= 0 &&
+                probe.Sequence.IndexOf("codex.stop") <
+                    probe.Sequence.IndexOf("deepseek-harness.start") &&
+                probe.Sequence.IndexOf("deepseek-harness.start") <
+                    probe.Sequence.IndexOf("deepseek-harness.refresh") &&
+                probe.Sequence.IndexOf("deepseek-harness.refresh") <
+                    probe.Sequence.IndexOf("deepseek-harness.read") &&
+                probe.Sequence.IndexOf("deepseek-harness.read") <
+                    probe.Sequence.IndexOf("persist"),
+                "agent switch orders stop, preflight, persistence, then commit");
+            Assert(changes.Count == 2 && changes[1].FocusChanged &&
+                changes[1].Kind == AgentKind.DeepSeekHarness &&
+                coordinator.IsCurrent(changes[1]),
+                "successful switch publishes one focused generation");
+
+            delayedCodexCallback();
+            Assert(changes.Count == 2 &&
+                !coordinator.IsCurrent(queuedOldChange),
+                "old and queued provider callbacks are generation filtered");
+            Assert(probe.ActiveCount == 1 && deepSeekHarness.IsActive &&
+                !codex.IsActive && deepSeekHarness.SubscriberCount == 1 &&
+                codex.SubscriberCount == 0,
+                "successful switch leaves one active subscribed provider");
+
+            codex.ForegroundResult = true;
+            deepSeekHarness.ForegroundResult = true;
+            codex.ActivationResult = true;
+            deepSeekHarness.ActivationResult = true;
+            int codexForegroundBefore = codex.ForegroundCount;
+            int codexActivationBefore = codex.ActivateWindowCount;
+            Assert(coordinator.IsForeground(new IntPtr(7)) &&
+                coordinator.TryActivateWindow() &&
+                deepSeekHarness.ForegroundCount == 1 &&
+                deepSeekHarness.ActivateWindowCount == 1 &&
+                codex.ForegroundCount == codexForegroundBefore &&
+                codex.ActivateWindowCount == codexActivationBefore,
+                "window operations dispatch only to the focused provider");
+
+            Assert(coordinator.TrySwitch(AgentKind.Codex, settings,
+                    DateTime.UtcNow, delegate { return true; },
+                    out firstSnapshot) &&
+                coordinator.FocusedKind == AgentKind.Codex,
+                "coordinator can switch back to the cached Codex provider");
+            int startBefore = codex.StartCount;
+            int stopBefore = codex.StopCount;
+            int focusChangesBefore = changes.Count(delegate(
+                AgentCoordinatorChangedEventArgs e)
+            {
+                return e.FocusChanged;
+            });
+            int sameTargetPersistCount = 0;
+            Assert(coordinator.TrySwitch(AgentKind.Codex, settings,
+                    DateTime.UtcNow, delegate
+                    {
+                        sameTargetPersistCount++;
+                        return true;
+                    }, out firstSnapshot) &&
+                sameTargetPersistCount == 0 &&
+                codex.StartCount == startBefore &&
+                codex.StopCount == stopBefore &&
+                changes.Count(delegate(AgentCoordinatorChangedEventArgs e)
+                {
+                    return e.FocusChanged;
+                }) == focusChangesBefore,
+                "same-target selection has no lifecycle or persistence churn");
+            coordinator.Dispose();
+            Assert(probe.ActiveCount == 0 && codex.DisposeCount == 1 &&
+                deepSeekHarness.DisposeCount == 1,
+                "coordinator disposes all cached providers once");
+        }
+
+        private static void RunAgentSwitchFailureChecks()
+        {
+            AssertSwitchFailureRollback("candidate start",
+                delegate(SwitchingFakeAgentProvider codex,
+                    SwitchingFakeAgentProvider deepSeekHarness)
+                {
+                    deepSeekHarness.StartFailuresRemaining = 1;
+                }, delegate { return true; });
+            AssertSwitchFailureRollback("candidate read",
+                delegate(SwitchingFakeAgentProvider codex,
+                    SwitchingFakeAgentProvider deepSeekHarness)
+                {
+                    deepSeekHarness.ReadFailuresRemaining = 1;
+                }, delegate { return true; });
+            AssertSwitchFailureRollback("focus persistence",
+                delegate(SwitchingFakeAgentProvider codex,
+                    SwitchingFakeAgentProvider deepSeekHarness)
+                {
+                }, delegate { return false; });
+            AssertSwitchFailureRollback("old stop after deactivate",
+                delegate(SwitchingFakeAgentProvider codex,
+                    SwitchingFakeAgentProvider deepSeekHarness)
+                {
+                    codex.StopFailuresAfterDeactivateRemaining = 1;
+                }, delegate { return true; });
+        }
+
+        private static void AssertSwitchFailureRollback(string scenario,
+            Action<SwitchingFakeAgentProvider,
+                SwitchingFakeAgentProvider> configure,
+            Func<bool> persist)
+        {
+            SwitchProbe probe = new SwitchProbe();
+            SwitchingFakeAgentProvider codex;
+            SwitchingFakeAgentProvider deepSeekHarness;
+            AgentProviderCatalog catalog = CreateSwitchCatalog(probe,
+                out codex, out deepSeekHarness);
+            HaloSettings settings = EnabledSwitchSettings(catalog);
+            AgentMonitorCoordinator coordinator =
+                new AgentMonitorCoordinator(catalog, AgentKind.Codex);
+            int focusChanges = 0;
+            coordinator.Changed += delegate(object sender,
+                AgentCoordinatorChangedEventArgs e)
+            {
+                if (e.FocusChanged)
+                {
+                    focusChanges++;
+                }
+            };
+            coordinator.Start();
+            configure(codex, deepSeekHarness);
+
+            AgentProviderSnapshot ignored;
+            bool switched = coordinator.TrySwitch(
+                AgentKind.DeepSeekHarness, settings, DateTime.UtcNow,
+                persist, out ignored);
+            Assert(!switched && coordinator.FocusedKind == AgentKind.Codex &&
+                settings.FocusedAgent == "codex" &&
+                coordinator.IsStarted && codex.IsActive &&
+                !deepSeekHarness.IsActive && probe.ActiveCount == 1 &&
+                probe.PeakActiveCount <= 1 && focusChanges == 0 &&
+                codex.SubscriberCount == 1 &&
+                deepSeekHarness.SubscriberCount == 0 &&
+                !String.IsNullOrWhiteSpace(coordinator.LastSwitchError),
+                "switch rollback restores Codex after " + scenario);
+            coordinator.Dispose();
+            Assert(probe.ActiveCount == 0,
+                "rollback fixture stops after " + scenario);
+        }
+
+        private static void RunAgentSwitchStressChecks()
+        {
+            SwitchProbe probe = new SwitchProbe();
+            SwitchingFakeAgentProvider codex;
+            SwitchingFakeAgentProvider deepSeekHarness;
+            AgentProviderCatalog catalog = CreateSwitchCatalog(probe,
+                out codex, out deepSeekHarness);
+            HaloSettings settings = EnabledSwitchSettings(catalog);
+            AgentMonitorCoordinator coordinator =
+                new AgentMonitorCoordinator(catalog, AgentKind.Codex);
+            coordinator.Start();
+            int persistCount = 0;
+            for (int i = 0; i < 100; i++)
+            {
+                AgentKind target = coordinator.FocusedKind == AgentKind.Codex
+                    ? AgentKind.DeepSeekHarness : AgentKind.Codex;
+                AgentProviderSnapshot snapshot;
+                bool switched = coordinator.TrySwitch(target, settings,
+                    DateTime.UtcNow, delegate
+                    {
+                        persistCount++;
+                        return true;
+                    }, out snapshot);
+                SwitchingFakeAgentProvider current = target == AgentKind.Codex
+                    ? codex : deepSeekHarness;
+                SwitchingFakeAgentProvider inactive = target == AgentKind.Codex
+                    ? deepSeekHarness : codex;
+                Assert(switched && coordinator.FocusedKind == target &&
+                    snapshot.Aggregate.FocusedAgent == target &&
+                    probe.ActiveCount == 1 && current.IsActive &&
+                    !inactive.IsActive && current.SubscriberCount == 1 &&
+                    inactive.SubscriberCount == 0,
+                    "stress switch keeps one active provider at iteration " +
+                    i.ToString(CultureInfo.InvariantCulture));
+            }
+            Assert(persistCount == 100 && probe.CodexCreateCount == 1 &&
+                probe.DeepSeekHarnessCreateCount == 1 &&
+                probe.PeakActiveCount == 1,
+                "100 switches reuse providers without active overlap");
+            coordinator.Dispose();
+            Assert(probe.ActiveCount == 0 && codex.DisposeCount == 1 &&
+                deepSeekHarness.DisposeCount == 1 &&
+                codex.SubscriberCount == 0 &&
+                deepSeekHarness.SubscriberCount == 0,
+                "100-switch coordinator releases providers and subscriptions");
+        }
+
+        private static void RunAgentPauseChecks()
+        {
+            SwitchProbe probe = new SwitchProbe();
+            SwitchingFakeAgentProvider codex;
+            SwitchingFakeAgentProvider deepSeekHarness;
+            AgentProviderCatalog catalog = CreateSwitchCatalog(probe,
+                out codex, out deepSeekHarness);
+            HaloSettings settings = EnabledSwitchSettings(catalog);
+            AgentMonitorCoordinator coordinator =
+                new AgentMonitorCoordinator(catalog, AgentKind.Codex);
+            int changedCount = 0;
+            coordinator.Changed += delegate { changedCount++; };
+            coordinator.Start();
+            Action oldCallback = codex.CaptureChanged();
+            coordinator.Stop();
+            codex.RaiseChanged();
+            oldCallback();
+            int persistCount = 0;
+            AgentProviderSnapshot snapshot;
+            bool switched = coordinator.TrySwitch(AgentKind.DeepSeekHarness,
+                settings, DateTime.UtcNow, delegate
+                {
+                    persistCount++;
+                    return true;
+                }, out snapshot);
+            Assert(!switched && persistCount == 0 &&
+                coordinator.FocusedKind == AgentKind.Codex &&
+                !codex.IsActive && !deepSeekHarness.IsActive &&
+                changedCount == 0,
+                "paused coordinator rejects switches and old callbacks");
+            coordinator.Start();
+            codex.RaiseChanged();
+            Assert(changedCount == 1 && codex.IsActive &&
+                codex.SubscriberCount == 1,
+                "resume starts and subscribes the focused provider once");
+            coordinator.Dispose();
+        }
+
+        private static void RunAgentDetailsIsolationChecks()
+        {
+            bool usageCreatedBefore =
+                CodexUsageMonitor.InstanceCreatedForDiagnostics;
+            AgentProviderSnapshot codex = CreateSwitchSnapshot(
+                AgentKind.Codex);
+            codex.Aggregate.State = HaloState.Working;
+            codex.Aggregate.Label = "EXECUTING";
+            codex.Aggregate.Presence = AgentPresenceState.Active;
+            codex.Details.Mode = AgentDetailsMode.Quota;
+            codex.Details.Usage = new UsageMetrics
+            {
+                HasFiveHour = true,
+                FiveHourUsedPercent = 20,
+                ContextInputTokens = 50,
+                ContextWindowTokens = 100
+            };
+            AgentProviderSnapshot deepSeekHarness = CreateSwitchSnapshot(
+                AgentKind.DeepSeekHarness);
+            deepSeekHarness.Aggregate.State = HaloState.Working;
+            deepSeekHarness.Aggregate.Label = "EXECUTING";
+            deepSeekHarness.Aggregate.Presence = AgentPresenceState.Active;
+            deepSeekHarness.Details.Mode = AgentDetailsMode.DeepSeekTask;
+            deepSeekHarness.Details.TaskTitle = "Synthetic DSH task";
+            deepSeekHarness.Details.ModelName = "deepseek-v4";
+            deepSeekHarness.Details.ModelSourceKey =
+                "details.deepseek.model_source.current_turn";
+
+            DetailsWindow panel = new DetailsWindow();
+            panel.SetEnabledAgents(new[]
+            {
+                AgentKind.Codex, AgentKind.DeepSeekHarness
+            });
+            panel.UpdateContent(codex);
+            Assert(panel.SelectedAgentForDiagnostics == AgentKind.Codex &&
+                panel.QuotaVisibleForDiagnostics &&
+                panel.ContextVisibleForDiagnostics,
+                "Codex details display quota and context");
+            panel.UpdateContent(deepSeekHarness);
+            Assert(panel.SelectedAgentForDiagnostics ==
+                    AgentKind.DeepSeekHarness &&
+                panel.DeepSeekTaskVisibleForDiagnostics &&
+                !panel.QuotaVisibleForDiagnostics &&
+                !panel.InformationVisibleForDiagnostics &&
+                !panel.ContextVisibleForDiagnostics,
+                "DSH task details hide Codex quota, custom API, and context data");
+            Assert(panel.DeepSeekTaskTitleForDiagnostics ==
+                    "Synthetic DSH task" &&
+                panel.DeepSeekModelNameForDiagnostics == "deepseek-v4",
+                "DSH panel displays only the task title and main agent model");
+
+            codex.Details.Mode = AgentDetailsMode.Information;
+            codex.Details.ProjectName = "AgentHalo";
+            codex.Details.ModelName = "codex-custom-model";
+            codex.Details.InputTokens = 1400;
+            codex.Details.OutputTokens = 80;
+            codex.Details.ContextInputTokens = 50;
+            codex.Details.ContextWindowTokens = 100;
+            panel.UpdateContent(codex);
+            Assert(panel.SelectedAgentForDiagnostics == AgentKind.Codex &&
+                panel.InformationVisibleForDiagnostics &&
+                !panel.QuotaVisibleForDiagnostics &&
+                panel.ContextVisibleForDiagnostics,
+                "Codex custom API details display separately from quota");
+            panel.UpdateContent(deepSeekHarness);
+            Assert(panel.DeepSeekTaskVisibleForDiagnostics &&
+                !panel.InformationVisibleForDiagnostics &&
+                !panel.QuotaVisibleForDiagnostics &&
+                !panel.ContextVisibleForDiagnostics &&
+                panel.DeepSeekTaskTitleForDiagnostics ==
+                    "Synthetic DSH task" &&
+                panel.DeepSeekModelNameForDiagnostics == "deepseek-v4",
+                "DSH task details do not retain Codex custom API data");
+            panel.UpdateContent(codex);
+            Assert(panel.SelectedAgentForDiagnostics == AgentKind.Codex &&
+                panel.InformationVisibleForDiagnostics &&
+                !panel.DeepSeekTaskVisibleForDiagnostics &&
+                panel.ContextVisibleForDiagnostics,
+                "switching back restores the injected Codex details");
+            panel.Close();
+            Assert(CodexUsageMonitor.InstanceCreatedForDiagnostics ==
+                    usageCreatedBefore,
+                "agent detail switching remains synthetic and offline");
+        }
+
+        private static AgentProviderCatalog CreateSwitchCatalog(
+            SwitchProbe probe, out SwitchingFakeAgentProvider codex,
+            out SwitchingFakeAgentProvider deepSeekHarness)
+        {
+            SwitchingFakeAgentProvider codexProvider =
+                new SwitchingFakeAgentProvider(AgentKind.Codex, probe);
+            SwitchingFakeAgentProvider deepSeekHarnessProvider =
+                new SwitchingFakeAgentProvider(
+                    AgentKind.DeepSeekHarness, probe);
+            codex = codexProvider;
+            deepSeekHarness = deepSeekHarnessProvider;
+            return new AgentProviderCatalog(new[]
+            {
+                new AgentProviderDescriptor
+                {
+                    Kind = AgentKind.Codex,
+                    Key = "codex",
+                    DisplayName = "Codex",
+                    Order = 0,
+                    EnabledByDefault = true,
+                    Capabilities = codexProvider.Capabilities,
+                    CreateProvider = delegate
+                    {
+                        probe.CodexCreateCount++;
+                        return codexProvider;
+                    }
+                },
+                new AgentProviderDescriptor
+                {
+                    Kind = AgentKind.DeepSeekHarness,
+                    Key = "deepseek-harness",
+                    DisplayName = "DeepSeek Harness",
+                    Order = 1,
+                    EnabledByDefault = false,
+                    Capabilities = deepSeekHarnessProvider.Capabilities,
+                    CreateProvider = delegate
+                    {
+                        probe.DeepSeekHarnessCreateCount++;
+                        return deepSeekHarnessProvider;
+                    }
+                }
+            });
+        }
+
+        private static HaloSettings EnabledSwitchSettings(
+            AgentProviderCatalog catalog)
+        {
+            HaloSettings settings = new HaloSettings
+            {
+                FocusedAgent = "codex",
+                EnabledAgents = new List<string>
+                {
+                    "codex", "deepseek-harness"
+                }
+            };
+            settings.NormalizeAgentSelection(catalog);
+            return settings;
+        }
+
+        private static AgentProviderSnapshot CreateSwitchSnapshot(
+            AgentKind kind)
+        {
+            List<SessionSnapshot> sessions = new List<SessionSnapshot>();
+            bool isDeepSeekHarness = kind == AgentKind.DeepSeekHarness;
+            return new AgentProviderSnapshot
+            {
+                Aggregate = new AggregateSnapshot
+                {
+                    State = HaloState.Idle,
+                    Label = "OFFLINE",
+                    Detail = isDeepSeekHarness
+                        ? "DeepSeek Harness offline"
+                        : L10n.Instance["status.offline_codex"],
+                    Sessions = sessions,
+                    FocusedAgent = kind,
+                    Presence = AgentPresenceState.Offline,
+                    TurnPhase = AgentTurnPhase.None,
+                    Activity = AgentActivityKind.None,
+                    EvidenceSource = AgentEvidenceSource.None,
+                    AttentionReason = AgentAttentionReason.None,
+                    FailureSeverity = AgentFailureSeverity.None
+                },
+                Sessions = sessions,
+                Details = new AgentDetailsSnapshot
+                {
+                    Agent = kind,
+                    Mode = isDeepSeekHarness
+                        ? AgentDetailsMode.DeepSeekTask
+                        : AgentDetailsMode.Quota,
+                    TaskTitle = isDeepSeekHarness
+                        ? "Synthetic DSH task" : String.Empty,
+                    ModelName = isDeepSeekHarness
+                        ? "deepseek-v4" : String.Empty,
+                    ModelSourceKey = isDeepSeekHarness
+                        ? "details.deepseek.model_source.current_turn" :
+                            String.Empty,
+                    Usage = null,
+                    ContextInputTokens = 0,
+                    ContextWindowTokens = 0
+                },
+                Capabilities = isDeepSeekHarness
+                    ? AgentCapability.Lifecycle
+                    : AgentCapability.Lifecycle |
+                      AgentCapability.WindowActivation
+            };
+        }
+
+        private sealed class SwitchProbe
+        {
+            public int ActiveCount;
+            public int PeakActiveCount;
+            public int CodexCreateCount;
+            public int DeepSeekHarnessCreateCount;
+            public readonly List<string> Sequence = new List<string>();
+
+            public void Activate()
+            {
+                ActiveCount++;
+                PeakActiveCount = Math.Max(PeakActiveCount, ActiveCount);
+            }
+
+            public void Deactivate()
+            {
+                ActiveCount--;
+            }
+        }
+
+        private sealed class SwitchingFakeAgentProvider : IAgentProvider
+        {
+            private readonly SwitchProbe probe;
+            private EventHandler changed;
+            private bool disposed;
+
+            public SwitchingFakeAgentProvider(AgentKind kind,
+                SwitchProbe sharedProbe)
+            {
+                Kind = kind;
+                probe = sharedProbe;
+                Snapshot = CreateSwitchSnapshot(kind);
+                ForegroundResult = true;
+                ActivationResult = true;
+            }
+
+            public AgentKind Kind { get; private set; }
+            public AgentCapability Capabilities
+            {
+                get
+                {
+                    return AgentCapability.Lifecycle |
+                        AgentCapability.WindowActivation;
+                }
+            }
+            public AgentProviderSnapshot Snapshot { get; private set; }
+            public bool IsActive { get; private set; }
+            public bool ForegroundResult;
+            public bool ActivationResult;
+            public bool RaiseChangedOnStop;
+            public int StartFailuresRemaining;
+            public int ReadFailuresRemaining;
+            public int StopFailuresAfterDeactivateRemaining;
+            public int StartCount;
+            public int StopCount;
+            public int RefreshCount;
+            public int ReadCount;
+            public int ForegroundCount;
+            public int ActivateWindowCount;
+            public int DisposeCount;
+            public int EventAddCount;
+            public int EventRemoveCount;
+            public int SubscriberCount;
+
+            public event EventHandler Changed
+            {
+                add
+                {
+                    changed += value;
+                    EventAddCount++;
+                    SubscriberCount = changed == null ? 0 :
+                        changed.GetInvocationList().Length;
+                }
+                remove
+                {
+                    changed -= value;
+                    EventRemoveCount++;
+                    SubscriberCount = changed == null ? 0 :
+                        changed.GetInvocationList().Length;
+                }
+            }
+
+            public void Start()
+            {
+                ThrowIfDisposed();
+                StartCount++;
+                probe.Sequence.Add(Key + ".start");
+                if (StartFailuresRemaining > 0)
+                {
+                    StartFailuresRemaining--;
+                    throw new InvalidOperationException(
+                        "Synthetic start failure");
+                }
+                if (!IsActive)
+                {
+                    IsActive = true;
+                    probe.Activate();
+                }
+            }
+
+            public void Stop()
+            {
+                StopCount++;
+                probe.Sequence.Add(Key + ".stop");
+                if (RaiseChangedOnStop)
+                {
+                    RaiseChanged();
+                }
+                if (IsActive)
+                {
+                    IsActive = false;
+                    probe.Deactivate();
+                }
+                if (StopFailuresAfterDeactivateRemaining > 0)
+                {
+                    StopFailuresAfterDeactivateRemaining--;
+                    throw new InvalidOperationException(
+                        "Synthetic stop failure after deactivation");
+                }
+            }
+
+            public bool Refresh()
+            {
+                ThrowIfDisposed();
+                RefreshCount++;
+                probe.Sequence.Add(Key + ".refresh");
+                return IsActive;
+            }
+
+            public AgentProviderSnapshot Read(HaloSettings settings,
+                DateTime nowUtc)
+            {
+                ThrowIfDisposed();
+                ReadCount++;
+                probe.Sequence.Add(Key + ".read");
+                if (ReadFailuresRemaining > 0)
+                {
+                    ReadFailuresRemaining--;
+                    throw new InvalidOperationException(
+                        "Synthetic read failure");
+                }
+                return Snapshot;
+            }
+
+            public bool IsForeground(IntPtr foregroundWindow)
+            {
+                ForegroundCount++;
+                return ForegroundResult && foregroundWindow != IntPtr.Zero;
+            }
+
+            public bool TryActivateWindow()
+            {
+                ActivateWindowCount++;
+                return ActivationResult;
+            }
+
+            public void RaiseChanged()
+            {
+                EventHandler handler = changed;
+                if (handler != null)
+                {
+                    handler(this, EventArgs.Empty);
+                }
+            }
+
+            public Action CaptureChanged()
+            {
+                EventHandler captured = changed;
+                return delegate
+                {
+                    if (captured != null)
+                    {
+                        captured(this, EventArgs.Empty);
+                    }
+                };
+            }
+
+            public void Dispose()
+            {
+                if (disposed)
+                {
+                    return;
+                }
+                disposed = true;
+                if (IsActive)
+                {
+                    IsActive = false;
+                    probe.Deactivate();
+                }
+                changed = null;
+                SubscriberCount = 0;
+                DisposeCount++;
+            }
+
+            private string Key
+            {
+                get
+                {
+                    return Kind == AgentKind.DeepSeekHarness
+                        ? "deepseek-harness" : "codex";
+                }
+            }
+
+            private void ThrowIfDisposed()
+            {
+                if (disposed)
+                {
+                    throw new ObjectDisposedException(
+                        "SwitchingFakeAgentProvider");
+                }
+            }
+        }
+
+        private sealed class FakeAgentProvider : IAgentProvider
+        {
+            public int StartCount;
+            public int StopCount;
+            public int RefreshCount;
+            public int ReadCount;
+            public int ForegroundCount;
+            public int ActivateWindowCount;
+            public int DisposeCount;
+            public int StartFailuresRemaining;
+            public int StopFailuresRemaining;
+            public readonly AgentProviderSnapshot Snapshot;
+
+            public FakeAgentProvider()
+            {
+                Snapshot = new AgentProviderSnapshot
+                {
+                    Aggregate = new AggregateSnapshot
+                    {
+                        State = HaloState.Idle,
+                        Label = "OFFLINE",
+                        Sessions = new List<SessionSnapshot>(),
+                        FocusedAgent = AgentKind.Codex,
+                        Presence = AgentPresenceState.Offline
+                    },
+                    Sessions = new List<SessionSnapshot>(),
+                    Details = new AgentDetailsSnapshot
+                    {
+                        Agent = AgentKind.Codex
+                    },
+                    Capabilities = Capabilities
+                };
+            }
+
+            public AgentKind Kind
+            {
+                get { return AgentKind.Codex; }
+            }
+
+            public AgentCapability Capabilities
+            {
+                get
+                {
+                    return AgentCapability.Lifecycle |
+                        AgentCapability.WindowActivation;
+                }
+            }
+
+            public event EventHandler Changed;
+
+            public void Start()
+            {
+                StartCount++;
+                if (StartFailuresRemaining > 0)
+                {
+                    StartFailuresRemaining--;
+                    throw new InvalidOperationException("Synthetic start failure");
+                }
+            }
+
+            public void Stop()
+            {
+                StopCount++;
+                if (StopFailuresRemaining > 0)
+                {
+                    StopFailuresRemaining--;
+                    throw new InvalidOperationException("Synthetic stop failure");
+                }
+            }
+
+            public bool Refresh()
+            {
+                RefreshCount++;
+                return true;
+            }
+
+            public AgentProviderSnapshot Read(HaloSettings settings,
+                DateTime nowUtc)
+            {
+                ReadCount++;
+                return Snapshot;
+            }
+
+            public bool IsForeground(IntPtr foregroundWindow)
+            {
+                ForegroundCount++;
+                return foregroundWindow != IntPtr.Zero;
+            }
+
+            public bool TryActivateWindow()
+            {
+                ActivateWindowCount++;
+                return true;
+            }
+
+            public void RaiseChanged()
+            {
+                EventHandler handler = Changed;
+                if (handler != null)
+                {
+                    handler(this, EventArgs.Empty);
+                }
+            }
+
+            public void Dispose()
+            {
+                DisposeCount++;
+            }
+        }
+
+
         private static void Assert(bool condition, string name)
         {
             if (!condition)
@@ -1310,6 +2631,8 @@ public static class Diagnostics
         {
             try
             {
+                Assert(!CodexUsageMonitor.InstanceCreatedForDiagnostics,
+                    "render states starts without usage singleton");
                 Directory.CreateDirectory(outputDirectory);
                 HaloState[] states = new HaloState[]
                 {
@@ -1385,6 +2708,8 @@ public static class Diagnostics
                     ErrorPresentation.Dim, ErrorPresentation.Flashing,
                     "transition-error-dim-flashing.png");
                 RenderCompletionFlashStrip(outputDirectory);
+                Assert(!CodexUsageMonitor.InstanceCreatedForDiagnostics,
+                    "render states does not create usage singleton");
                 return 0;
             }
             catch (Exception ex)
@@ -1438,21 +2763,38 @@ public static class Diagnostics
                 Sessions = sessions
             };
 
-            DetailsWindow panel = new DetailsWindow();
-            panel.SetPreviewMetrics(new UsageMetrics
+            AgentProviderSnapshot quotaSnapshot = new AgentProviderSnapshot
             {
-                HasFiveHour = true,
-                FiveHourUsedPercent = 21,
-                FiveHourResetUtc = DateTime.Today.AddHours(14)
-                    .AddMinutes(58).ToUniversalTime(),
-                HasWeekly = true,
-                WeeklyUsedPercent = 27,
-                WeeklyResetUtc = DateTime.Today.AddDays(3).AddHours(9)
-                    .AddMinutes(36).ToUniversalTime(),
-                ContextInputTokens = 202600,
-                ContextWindowTokens = 258400
-            });
-            panel.UpdateContent(aggregate, sessions);
+                Aggregate = aggregate,
+                Sessions = sessions,
+                Details = new AgentDetailsSnapshot
+                {
+                    Agent = AgentKind.Codex,
+                    Mode = AgentDetailsMode.Quota,
+                    Usage = new UsageMetrics
+                    {
+                        HasFiveHour = true,
+                        FiveHourUsedPercent = 21,
+                        FiveHourResetUtc = DateTime.Today.AddHours(14)
+                            .AddMinutes(58).ToUniversalTime(),
+                        HasWeekly = true,
+                        WeeklyUsedPercent = 27,
+                        WeeklyResetUtc = DateTime.Today.AddDays(3).AddHours(9)
+                            .AddMinutes(36).ToUniversalTime(),
+                        ContextInputTokens = 202600,
+                        ContextWindowTokens = 258400
+                    }
+                },
+                Capabilities = AgentCapability.Lifecycle |
+                    AgentCapability.ToolName |
+                    AgentCapability.Attention |
+                    AgentCapability.Usage |
+                    AgentCapability.ContextWindow |
+                    AgentCapability.WindowActivation
+            };
+
+            DetailsWindow panel = new DetailsWindow();
+            panel.UpdateContent(quotaSnapshot);
             FrameworkElement panelContent = panel.Content as FrameworkElement;
             panel.Content = null;
 
@@ -1482,18 +2824,31 @@ public static class Diagnostics
             }
             panel.Close();
 
-            DetailsWindow customCodexPanel = new DetailsWindow();
-            customCodexPanel.SetPreviewCodexCustomMetrics(new CodexCustomApiMetrics
+            AgentProviderSnapshot customCodexSnapshot = new AgentProviderSnapshot
             {
-                IsCustomApi = true,
-                ProjectName = "AgentHalo",
-                Model = "glm-5.2",
-                InputTokens = 14200,
-                OutputTokens = 730,
-                ContextTokens = 14200,
-                ContextWindowTokens = 128000
-            });
-            customCodexPanel.UpdateContent(aggregate, sessions);
+                Aggregate = aggregate,
+                Sessions = sessions,
+                Details = new AgentDetailsSnapshot
+                {
+                    Agent = AgentKind.Codex,
+                    Mode = AgentDetailsMode.Information,
+                    ProjectName = "AgentHalo",
+                    ModelName = "glm-5.2",
+                    InputTokens = 14200,
+                    OutputTokens = 730,
+                    ContextInputTokens = 14200,
+                    ContextWindowTokens = 128000
+                },
+                Capabilities = AgentCapability.Lifecycle |
+                    AgentCapability.ToolName |
+                    AgentCapability.Attention |
+                    AgentCapability.Usage |
+                    AgentCapability.ContextWindow |
+                    AgentCapability.WindowActivation
+            };
+
+            DetailsWindow customCodexPanel = new DetailsWindow();
+            customCodexPanel.UpdateContent(customCodexSnapshot);
             FrameworkElement customCodexContent =
                 customCodexPanel.Content as FrameworkElement;
             customCodexPanel.Content = null;
@@ -1523,6 +2878,62 @@ public static class Diagnostics
             }
             customCodexPanel.Close();
 
+            AgentProviderSnapshot deepSeekTaskSnapshot =
+                CreateSwitchSnapshot(AgentKind.DeepSeekHarness);
+            deepSeekTaskSnapshot.Aggregate.State = HaloState.Working;
+            deepSeekTaskSnapshot.Aggregate.Label = "EXECUTING";
+            deepSeekTaskSnapshot.Aggregate.Presence =
+                AgentPresenceState.Active;
+            deepSeekTaskSnapshot.Details.Mode =
+                AgentDetailsMode.DeepSeekTask;
+            deepSeekTaskSnapshot.Details.TaskTitle = "Review DSH task state";
+            deepSeekTaskSnapshot.Details.ModelName = "deepseek-v4";
+            deepSeekTaskSnapshot.Details.ModelSourceKey =
+                "details.deepseek.model_source.current_turn";
+            RenderAgentPanel(outputDirectory,
+                "panel-deepseek-harness-task.png", deepSeekTaskSnapshot);
+        }
+
+        private static void RenderAgentPanel(string outputDirectory,
+            string fileName, AgentProviderSnapshot snapshot)
+        {
+            DetailsWindow panel = new DetailsWindow();
+            panel.SetEnabledAgents(new[]
+            {
+                AgentKind.Codex, AgentKind.DeepSeekHarness
+            });
+            panel.UpdateContent(snapshot);
+            FrameworkElement panelContent = panel.Content as FrameworkElement;
+            panel.Content = null;
+
+            double previewContentWidth = panel.Width + 4;
+            double previewStageWidth = previewContentWidth + 56;
+            Grid stage = new Grid();
+            stage.Width = previewStageWidth;
+            stage.Background = new SolidColorBrush(
+                MediaColor.FromRgb(7, 10, 15));
+            panelContent.Width = previewContentWidth;
+            panelContent.Margin = new Thickness(28);
+            stage.Children.Add(panelContent);
+            stage.Measure(new System.Windows.Size(previewStageWidth, 1000));
+            double height = Math.Ceiling(stage.DesiredSize.Height);
+            stage.Height = height;
+            stage.Arrange(new Rect(0, 0, previewStageWidth, height));
+            stage.UpdateLayout();
+
+            RenderTargetBitmap bitmap = new RenderTargetBitmap(
+                (int)Math.Ceiling(previewStageWidth * 2),
+                (int)Math.Ceiling(height * 2), 192, 192,
+                PixelFormats.Pbgra32);
+            bitmap.Render(stage);
+            PngBitmapEncoder encoder = new PngBitmapEncoder();
+            encoder.Frames.Add(BitmapFrame.Create(bitmap));
+            using (FileStream stream = File.Create(Path.Combine(
+                outputDirectory, fileName)))
+            {
+                encoder.Save(stream);
+            }
+            panel.Close();
         }
 
         private static void RenderMenuPreview(string outputDirectory)
@@ -1534,6 +2945,21 @@ public static class Diagnostics
                 topmost.Checked = true;
                 menu.Items.Add(topmost);
                 menu.Items.Add("开机自动启动");
+                menu.Items.Add("暂停状态监听");
+                Forms.ToolStripMenuItem currentAgent =
+                    new Forms.ToolStripMenuItem("当前 Agent");
+                Forms.ToolStripMenuItem currentCodex =
+                    new Forms.ToolStripMenuItem("Codex");
+                currentCodex.AccessibleRole =
+                    Forms.AccessibleRole.RadioButton;
+                currentCodex.Checked = true;
+                currentAgent.DropDownItems.Add(currentCodex);
+                Forms.ToolStripMenuItem currentDeepSeekHarness =
+                    new Forms.ToolStripMenuItem("DeepSeek Harness");
+                currentDeepSeekHarness.AccessibleRole =
+                    Forms.AccessibleRole.RadioButton;
+                currentAgent.DropDownItems.Add(currentDeepSeekHarness);
+                menu.Items.Add(currentAgent);
                 Forms.ToolStripMenuItem size =
                     new Forms.ToolStripMenuItem("光环大小");
                 size.DropDownItems.Add("75%");

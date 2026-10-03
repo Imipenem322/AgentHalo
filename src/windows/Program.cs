@@ -29,8 +29,9 @@ using MediaPoint = System.Windows.Point;
 [assembly: System.Reflection.AssemblyDescription("Ambient desktop status light for coding agents")]
 [assembly: System.Reflection.AssemblyCompany("Agent Halo")]
 [assembly: System.Reflection.AssemblyProduct("Agent Halo")]
-[assembly: System.Reflection.AssemblyVersion("0.15.1.0")]
-[assembly: System.Reflection.AssemblyFileVersion("0.15.1.0")]
+[assembly: System.Reflection.AssemblyVersion("0.16.0.0")]
+[assembly: System.Reflection.AssemblyFileVersion("0.16.0.0")]
+[assembly: System.Reflection.AssemblyInformationalVersion("0.16.0")]
 
 namespace CodexHalo
 {
@@ -42,6 +43,13 @@ public static class Program
         public static int Main()
         {
             string[] args = Environment.GetCommandLineArgs();
+            // Legacy helper invocations must not fall through and start the
+            // interactive monitor after their implementation is removed.
+            if (args.Length >= 2 && args[1].StartsWith(
+                    "--antigravity-", StringComparison.Ordinal))
+            {
+                return 0;
+            }
             // Older builds may have left AgentHalo hook commands in Claude's
             // settings. Keep this compatibility no-op so those commands exit
             // immediately instead of launching the normal Codex-only app.
@@ -52,6 +60,10 @@ public static class Program
             if (args.Length >= 3 && args[1] == "--self-test")
             {
                 return Diagnostics.RunSelfTest(args[2]);
+            }
+            if (args.Length >= 3 && args[1] == "--deepseek-snapshot")
+            {
+                return DeepSeekHarnessSnapshotCommand.Run(args[2]);
             }
             if (args.Length >= 3 && args[1] == "--snapshot")
             {
@@ -97,7 +109,17 @@ public static class Program
                 return 0;
             }
 
-            HaloWindow window = new HaloWindow(SettingsStorage.Load());
+            HaloSettings settings = SettingsStorage.Load();
+            DeepSeekHarnessSetup deepSeekSetup =
+                settings.DeepSeekHarnessSetupComplete &&
+                !settings.IsAgentEnabled(AgentKind.DeepSeekHarness)
+                    ? null : new DeepSeekHarnessSetup();
+            if (deepSeekSetup != null && deepSeekSetup.TryInstall() &&
+                DeepSeekHarnessSetup.EnableMonitoring(settings))
+            {
+                SettingsStorage.Save(settings);
+            }
+            HaloWindow window = new HaloWindow(settings, deepSeekSetup);
             app.ShutdownMode = ShutdownMode.OnMainWindowClose;
             app.MainWindow = window;
             window.Show();

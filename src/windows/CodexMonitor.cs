@@ -846,6 +846,7 @@ public sealed class CodexSessionMonitor : IDisposable
         private string realtimeAction;
         private bool realtimeAnswerStreaming;
         private bool hasRealtimeActivity;
+        private bool started;
         private int pollInProgress;
         private FileSystemWatcher sessionWatcher;
 
@@ -875,6 +876,8 @@ public sealed class CodexSessionMonitor : IDisposable
         {
             lock (sync)
             {
+                started = true;
+                lastDiscoveryUtc = DateTime.MinValue;
                 EnsureSessionWatcher();
             }
             timer.Change(0, 220);
@@ -883,6 +886,15 @@ public sealed class CodexSessionMonitor : IDisposable
         public void Stop()
         {
             timer.Change(Timeout.Infinite, Timeout.Infinite);
+            lock (sync)
+            {
+                started = false;
+                if (sessionWatcher != null)
+                {
+                    sessionWatcher.EnableRaisingEvents = false;
+                }
+                pendingSessionPaths.Clear();
+            }
         }
 
         private void OnTick(object state)
@@ -896,6 +908,10 @@ public sealed class CodexSessionMonitor : IDisposable
             {
                 lock (sync)
                 {
+                    if (!started)
+                    {
+                        return;
+                    }
                     EnsureSessionWatcher();
                     if (DrainPendingSessions())
                     {
@@ -1004,7 +1020,12 @@ public sealed class CodexSessionMonitor : IDisposable
 
         private void EnsureSessionWatcher()
         {
-            if (sessionWatcher != null || !Directory.Exists(root))
+            if (sessionWatcher != null)
+            {
+                sessionWatcher.EnableRaisingEvents = true;
+                return;
+            }
+            if (!Directory.Exists(root))
             {
                 return;
             }
@@ -1045,6 +1066,10 @@ public sealed class CodexSessionMonitor : IDisposable
             }
             lock (sync)
             {
+                if (!started)
+                {
+                    return;
+                }
                 pendingSessionPaths.Add(path);
             }
         }
@@ -1178,7 +1203,8 @@ public sealed class CodexSessionMonitor : IDisposable
             if (snapshot.State == HaloState.Done)
             {
                 return codexRunning &&
-                    snapshot.CompletedUtc > settings.GetAcknowledgedUtc(snapshot.ThreadId) &&
+                    snapshot.CompletedUtc > settings.GetAcknowledgedUtc(
+                        snapshot.Agent, snapshot.ThreadId) &&
                     snapshot.CompletedUtc >= settings.GetInstalledUtc() &&
                     snapshot.CompletedUtc > now.Subtract(CodexCompletionVisibleDuration);
             }
@@ -1323,6 +1349,7 @@ public sealed class CodexSessionMonitor : IDisposable
             FileSystemWatcher watcher;
             lock (sync)
             {
+                started = false;
                 watcher = sessionWatcher;
                 sessionWatcher = null;
             }

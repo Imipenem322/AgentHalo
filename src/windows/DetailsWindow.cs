@@ -10,7 +10,10 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Windows;
+using System.Windows.Automation;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
+using System.Windows.Data;
 using System.Windows.Documents;
 using System.Windows.Input;
 using System.Windows.Interop;
@@ -140,6 +143,7 @@ public sealed class DetailsWindow : Window
         private readonly TextBlock headline;
         private readonly TextBlock subtitle;
         private readonly Border shell;
+        private readonly Border agentSelector;
         private readonly TextBlock fiveHourLabel;
         private readonly TextBlock fiveHourValue;
         private readonly TextBlock fiveHourReset;
@@ -149,6 +153,14 @@ public sealed class DetailsWindow : Window
         private readonly TextBlock longTermReset;
         private readonly Grid longTermRow;
         private readonly ContextBatteryMeter contextMeter;
+        private readonly Button firstSegmentButton;
+        private readonly Button secondSegmentButton;
+        private readonly TextBlock firstSegmentText;
+        private readonly TextBlock secondSegmentText;
+        private readonly Grid splitAgentSelector;
+        private readonly Button dropdownAgentButton;
+        private readonly TextBlock dropdownAgentText;
+        private readonly ContextMenu agentMenu;
         private readonly StackPanel quotaGroup;
         private readonly StackPanel infoGroup;
         private readonly Grid dataLayer;
@@ -163,14 +175,58 @@ public sealed class DetailsWindow : Window
         private readonly TextBlock infoProjectValue;
         private readonly TextBlock infoModelValue;
         private readonly TextBlock infoTokenValue;
+        private readonly StackPanel deepSeekGroup;
+        private readonly TextBlock deepSeekTaskLabel;
+        private readonly TextBlock deepSeekTaskValue;
+        private readonly TextBlock deepSeekModelLabel;
+        private readonly TextBlock deepSeekModelValue;
         private readonly RoundedMeter fiveHourBar;
         private readonly RoundedMeter longTermBar;
-        private readonly DispatcherTimer quotaTimer;
         private string longTermLabelKey;
-        private UsageMetrics previewMetrics;
-        private CodexCustomApiMetrics previewCodexCustomMetrics;
-        private AggregateSnapshot currentAggregate;
-        private List<SessionSnapshot> currentSessions;
+        private AgentProviderSnapshot currentSnapshot;
+        private AgentKind selectedAgent;
+        private bool agentSwitchingEnabled = true;
+        private readonly List<AgentProviderDescriptor> enabledAgentDescriptors =
+            new List<AgentProviderDescriptor>();
+        private AgentProviderDescriptor firstSegmentAgent;
+        private AgentProviderDescriptor secondSegmentAgent;
+
+        internal event Action<AgentKind> AgentFocusRequested;
+
+        internal AgentKind SelectedAgentForDiagnostics
+        {
+            get { return selectedAgent; }
+        }
+
+        internal bool QuotaVisibleForDiagnostics
+        {
+            get { return quotaGroup.Visibility == Visibility.Visible; }
+        }
+
+        internal bool InformationVisibleForDiagnostics
+        {
+            get { return infoGroup.Visibility == Visibility.Visible; }
+        }
+
+        internal bool ContextVisibleForDiagnostics
+        {
+            get { return contextMeter.Visibility == Visibility.Visible; }
+        }
+
+        internal bool DeepSeekTaskVisibleForDiagnostics
+        {
+            get { return deepSeekGroup.Visibility == Visibility.Visible; }
+        }
+
+        internal string DeepSeekTaskTitleForDiagnostics
+        {
+            get { return deepSeekTaskValue.Text; }
+        }
+
+        internal string DeepSeekModelNameForDiagnostics
+        {
+            get { return deepSeekModelValue.Text; }
+        }
 
         public DetailsWindow()
         {
@@ -210,10 +266,115 @@ public sealed class DetailsWindow : Window
             statusRow.ColumnDefinitions.Add(new ColumnDefinition());
             statusRow.ColumnDefinitions.Add(new ColumnDefinition
                 { Width = GridLength.Auto });
+            statusRow.ColumnDefinitions.Add(new ColumnDefinition
+                { Width = GridLength.Auto });
             headline = NewText("OFFLINE", 20,
                 MediaColor.FromRgb(40, 52, 60), FontWeights.Bold);
             headline.VerticalAlignment = VerticalAlignment.Center;
             statusRow.Children.Add(headline);
+
+            agentSelector = new Border
+            {
+                Width = 84,
+                Height = 24,
+                Margin = new Thickness(5, 0, 8, 0),
+                VerticalAlignment = VerticalAlignment.Center,
+                CornerRadius = new CornerRadius(7),
+                BorderThickness = new Thickness(1),
+                BorderBrush = new SolidColorBrush(
+                    MediaColor.FromArgb(70, 150, 177, 191)),
+                Background = new SolidColorBrush(
+                    MediaColor.FromArgb(82, 231, 239, 244)),
+                ClipToBounds = true
+            };
+            Grid selectorContent = new Grid();
+            splitAgentSelector = new Grid();
+            splitAgentSelector.ColumnDefinitions.Add(new ColumnDefinition());
+            splitAgentSelector.ColumnDefinitions.Add(new ColumnDefinition());
+            Style segmentStyle = CreateAgentSegmentStyle();
+            firstSegmentText = NewText(L10n.Instance["agent.codex"], 10.5,
+                MediaColor.FromRgb(64, 83, 94), FontWeights.SemiBold, true);
+            firstSegmentText.HorizontalAlignment = HorizontalAlignment.Center;
+            firstSegmentText.VerticalAlignment = VerticalAlignment.Center;
+            firstSegmentButton = CreateAgentSegmentButton(firstSegmentText,
+                segmentStyle, L10n.Instance["agent.codex"]);
+            firstSegmentButton.Click += delegate
+            {
+                if (firstSegmentAgent != null)
+                {
+                    RequestAgentFocus(firstSegmentAgent.Kind);
+                }
+            };
+            splitAgentSelector.Children.Add(firstSegmentButton);
+
+            secondSegmentText = NewText(String.Empty, 10.5,
+                MediaColor.FromRgb(64, 83, 94), FontWeights.SemiBold, true);
+            secondSegmentText.HorizontalAlignment = HorizontalAlignment.Center;
+            secondSegmentText.VerticalAlignment = VerticalAlignment.Center;
+            secondSegmentButton = CreateAgentSegmentButton(
+                secondSegmentText, segmentStyle, String.Empty);
+            secondSegmentButton.Click += delegate
+            {
+                if (secondSegmentAgent != null)
+                {
+                    RequestAgentFocus(secondSegmentAgent.Kind);
+                }
+            };
+            Grid.SetColumn(secondSegmentButton, 1);
+            splitAgentSelector.Children.Add(secondSegmentButton);
+            Border selectorDivider = new Border
+            {
+                Width = 1,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                Margin = new Thickness(0, 4, 0, 4),
+                Background = new SolidColorBrush(
+                    MediaColor.FromArgb(58, 142, 166, 178)),
+                IsHitTestVisible = false
+            };
+            Grid.SetColumnSpan(selectorDivider, 2);
+            splitAgentSelector.Children.Add(selectorDivider);
+            KeyboardNavigation.SetTabNavigation(splitAgentSelector,
+                KeyboardNavigationMode.Cycle);
+
+            StackPanel dropdownContent = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            dropdownAgentText = NewText(String.Empty, 10.5,
+                MediaColor.FromRgb(34, 84, 113), FontWeights.SemiBold, true);
+            dropdownContent.Children.Add(dropdownAgentText);
+            System.Windows.Shapes.Path dropdownChevron =
+                new System.Windows.Shapes.Path
+                {
+                    Data = Geometry.Parse("M 0,0 L 4,4 L 8,0"),
+                    Width = 8,
+                    Height = 4,
+                    Stretch = Stretch.Fill,
+                    Stroke = new SolidColorBrush(
+                        MediaColor.FromRgb(64, 83, 94)),
+                    StrokeThickness = 1.25,
+                    Margin = new Thickness(5, 0, 0, 0),
+                    VerticalAlignment = VerticalAlignment.Center
+                };
+            dropdownContent.Children.Add(dropdownChevron);
+            dropdownAgentButton = CreateAgentSegmentButton(dropdownContent,
+                segmentStyle, L10n.Instance["menu.current_agent"]);
+            agentMenu = new ContextMenu();
+            dropdownAgentButton.ContextMenu = agentMenu;
+            dropdownAgentButton.Click += delegate
+            {
+                agentMenu.PlacementTarget = dropdownAgentButton;
+                agentMenu.Placement = PlacementMode.Bottom;
+                agentMenu.IsOpen = true;
+            };
+            selectorContent.Children.Add(splitAgentSelector);
+            selectorContent.Children.Add(dropdownAgentButton);
+            agentSelector.Child = selectorContent;
+            Grid.SetColumn(agentSelector, 1);
+            statusRow.Children.Add(agentSelector);
+
             contextMeter = new ContextBatteryMeter
             {
                 Width = 46,
@@ -221,11 +382,11 @@ public sealed class DetailsWindow : Window
                 HorizontalAlignment = HorizontalAlignment.Right,
                 VerticalAlignment = VerticalAlignment.Center
             };
-            Grid.SetColumn(contextMeter, 1);
+            Grid.SetColumn(contextMeter, 2);
             statusRow.Children.Add(contextMeter);
             content.Children.Add(statusRow);
 
-            subtitle = NewText(L10n.Instance["status.offline_codex"], 13,
+            subtitle = NewText(L10n.Instance["status.offline"], 13,
                 MediaColor.FromRgb(103, 117, 126), FontWeights.Normal, true);
             subtitle.Margin = new Thickness(0, 1, 0, 13);
             content.Children.Add(subtitle);
@@ -263,34 +424,42 @@ public sealed class DetailsWindow : Window
             infoTokenValue.FontWeight = FontWeights.SemiBold;
             infoGroup.Children.Add(infoTokenRow);
 
+            deepSeekGroup = new StackPanel
+            {
+                VerticalAlignment = VerticalAlignment.Center,
+                Visibility = Visibility.Collapsed
+            };
+            Grid deepSeekTaskRow = CreateDeepSeekRow(
+                "details.deepseek.task_label", out deepSeekTaskLabel,
+                out deepSeekTaskValue);
+            deepSeekTaskValue.TextWrapping = TextWrapping.Wrap;
+            deepSeekTaskValue.TextTrimming = TextTrimming.CharacterEllipsis;
+            deepSeekTaskValue.MaxHeight = 32;
+            deepSeekTaskValue.LineHeight = 15;
+            deepSeekGroup.Children.Add(deepSeekTaskRow);
+            Grid deepSeekModelRow = CreateDeepSeekRow(
+                "details.deepseek.main_model_label", out deepSeekModelLabel,
+                out deepSeekModelValue);
+            deepSeekModelValue.TextWrapping = TextWrapping.NoWrap;
+            deepSeekModelValue.TextTrimming = TextTrimming.CharacterEllipsis;
+            deepSeekModelValue.MaxHeight = 18;
+            deepSeekModelRow.Margin = new Thickness(0, 11, 0, 0);
+            deepSeekGroup.Children.Add(deepSeekModelRow);
+
             dataLayer = new Grid();
             dataLayer.Height = 80;
+            dataLayer.MinHeight = 80;
             dataLayer.VerticalAlignment = VerticalAlignment.Top;
             dataLayer.Children.Add(quotaGroup);
             dataLayer.Children.Add(infoGroup);
+            dataLayer.Children.Add(deepSeekGroup);
             content.Children.Add(dataLayer);
+            UpdateAgentSelector(AgentKind.Codex);
 
             Grid layers = new Grid();
             layers.Children.Add(content);
             shell.Child = layers;
             Content = shell;
-            Closed += delegate
-            {
-                quotaTimer.Stop();
-                CodexUsageMonitor.Instance.Updated -= OnCodexUsageUpdated;
-            };
-            quotaTimer = new DispatcherTimer();
-            quotaTimer.Interval = TimeSpan.FromSeconds(3);
-            quotaTimer.Tick += delegate
-            {
-                if (IsVisible)
-                {
-                    RefreshSupplementalData();
-                }
-            };
-            quotaTimer.Start();
-            CodexUsageMonitor.Instance.Updated += OnCodexUsageUpdated;
-
             L10n.Instance.LanguageChanged += (s, ev) =>
             {
                 Dispatcher.Invoke(() => RefreshAllText());
@@ -304,15 +473,157 @@ public sealed class DetailsWindow : Window
             SetWindowLong(handle, -20, style | 0x08000000 | 0x00000080);
         }
 
-        public void UpdateContent(AggregateSnapshot aggregate, List<SessionSnapshot> sessions)
+        internal void UpdateContent(AgentProviderSnapshot snapshot)
         {
-            currentAggregate = aggregate;
-            currentSessions = sessions ?? new List<SessionSnapshot>();
+            if (snapshot == null || snapshot.Aggregate == null)
+            {
+                return;
+            }
+            currentSnapshot = snapshot;
+            AggregateSnapshot aggregate = snapshot.Aggregate;
+            List<SessionSnapshot> sessions = snapshot.Sessions
+                ?? new List<SessionSnapshot>();
             headline.Text = aggregate.Label;
             MediaColor accent = HaloVisual.StateColor(aggregate.State);
             headline.Foreground = new SolidColorBrush(accent);
-            subtitle.Text = FriendlyStatusDetail(aggregate, sessions);
-            RefreshSupplementalData();
+            AgentDetailsSnapshot details = snapshot.Details;
+            if (IsDeepSeekTask(snapshot))
+            {
+                bool paused = String.Equals(aggregate.Label, "PAUSED",
+                    StringComparison.OrdinalIgnoreCase);
+                bool providerSaysPaused = String.Equals(
+                    details.StatusDetailKey, "status.paused",
+                    StringComparison.Ordinal);
+                subtitle.Text = paused && !providerSaysPaused
+                    ? L10n.Instance["status.paused"]
+                    : L10n.Instance[LocalizedKeyOrDefault(
+                        details.StatusDetailKey, "status.deepseek.unknown")];
+            }
+            else
+            {
+                subtitle.Text = FriendlyStatusDetail(aggregate, sessions);
+            }
+            UpdateAgentSelector(aggregate.FocusedAgent);
+            RefreshSupplementalData(snapshot);
+        }
+
+        internal void SetAgentSwitchingEnabled(bool enabled)
+        {
+            agentSwitchingEnabled = enabled;
+            ApplyAgentSwitchingState();
+        }
+
+        internal void SetEnabledAgents(IEnumerable<AgentKind> enabledAgents)
+        {
+            List<AgentProviderDescriptor> descriptors =
+                new List<AgentProviderDescriptor>();
+            if (enabledAgents != null)
+            {
+                foreach (AgentKind agent in enabledAgents)
+                {
+                    descriptors.Add(CreateSelectorDescriptor(agent));
+                }
+            }
+            SetEnabledAgentDescriptors(descriptors);
+        }
+
+        internal void SetEnabledAgentDescriptors(
+            IEnumerable<AgentProviderDescriptor> descriptors)
+        {
+            List<AgentProviderDescriptor> next =
+                new List<AgentProviderDescriptor>();
+            if (descriptors != null)
+            {
+                next.AddRange(descriptors
+                    .Where(delegate(AgentProviderDescriptor descriptor)
+                    {
+                        return descriptor != null;
+                    })
+                    .OrderBy(delegate(AgentProviderDescriptor descriptor)
+                    {
+                        return descriptor.Order;
+                    }));
+            }
+            if (!SameAgentOptions(enabledAgentDescriptors, next))
+            {
+                enabledAgentDescriptors.Clear();
+                enabledAgentDescriptors.AddRange(next);
+                RebuildAgentMenu();
+            }
+            UpdateAgentSelector(selectedAgent);
+            ApplyAgentSwitchingState();
+        }
+
+        private static bool SameAgentOptions(
+            IList<AgentProviderDescriptor> current,
+            IList<AgentProviderDescriptor> next)
+        {
+            if (current.Count != next.Count)
+            {
+                return false;
+            }
+            for (int index = 0; index < current.Count; index++)
+            {
+                AgentProviderDescriptor left = current[index];
+                AgentProviderDescriptor right = next[index];
+                if (left.Kind != right.Kind || left.Order != right.Order ||
+                    !String.Equals(left.Key, right.Key,
+                        StringComparison.Ordinal) ||
+                    !String.Equals(left.DisplayNameKey,
+                        right.DisplayNameKey, StringComparison.Ordinal) ||
+                    !String.Equals(left.DisplayName, right.DisplayName,
+                        StringComparison.Ordinal))
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        private static AgentProviderDescriptor CreateSelectorDescriptor(
+            AgentKind kind)
+        {
+            string key;
+            string name;
+            switch (kind)
+            {
+                case AgentKind.DeepSeekHarness:
+                    key = "agent.deepseek-harness";
+                    name = "DeepSeek Harness";
+                    break;
+                default:
+                    key = "agent.codex";
+                    name = "Codex";
+                    break;
+            }
+            return new AgentProviderDescriptor
+            {
+                Kind = kind,
+                Order = kind == AgentKind.DeepSeekHarness ? 1 : 0,
+                DisplayName = name,
+                DisplayNameKey = key
+            };
+        }
+
+        private static string FullAgentName(
+            AgentProviderDescriptor descriptor)
+        {
+            string translated = String.IsNullOrWhiteSpace(
+                descriptor.DisplayNameKey) ? String.Empty :
+                L10n.Instance[descriptor.DisplayNameKey];
+            return String.IsNullOrEmpty(translated) ||
+                String.Equals(translated, descriptor.DisplayNameKey,
+                    StringComparison.Ordinal)
+                ? descriptor.DisplayName : translated;
+        }
+
+        private static string ShortAgentName(
+            AgentProviderDescriptor descriptor)
+        {
+            string key = descriptor.DisplayNameKey + ".short";
+            string translated = L10n.Instance[key];
+            return String.Equals(translated, key, StringComparison.Ordinal)
+                ? FullAgentName(descriptor) : translated;
         }
 
         private static string FriendlyStatusDetail(AggregateSnapshot aggregate,
@@ -325,7 +636,8 @@ public sealed class DetailsWindow : Window
                 {
                     return L10n.Instance["status.paused"];
                 }
-                return L10n.Instance["status.offline_codex"];
+                return String.IsNullOrWhiteSpace(aggregate.Detail)
+                    ? L10n.Instance["status.offline"] : aggregate.Detail;
             }
             if (String.Equals(aggregate.Label, "STANDBY",
                 StringComparison.OrdinalIgnoreCase) &&
@@ -386,15 +698,72 @@ public sealed class DetailsWindow : Window
             }
         }
 
-        private void RefreshSupplementalData()
+        private void RefreshSupplementalData(AgentProviderSnapshot snapshot)
         {
-            if (IsOfflineAggregate(currentAggregate))
+            AgentDetailsSnapshot details = snapshot == null
+                ? null : snapshot.Details;
+            AggregateSnapshot aggregate = snapshot == null
+                ? null : snapshot.Aggregate;
+            dataLayer.Height = IsDeepSeekTask(snapshot) ? Double.NaN : 80;
+            deepSeekGroup.Visibility = Visibility.Collapsed;
+            if (details != null &&
+                details.Mode == AgentDetailsMode.DeepSeekTask)
             {
-                ApplyOfflinePlaceholders();
+                ApplyDeepSeekTaskDetails(details);
+                return;
+            }
+            if (IsOfflineAggregate(aggregate))
+            {
+                ApplyOfflinePlaceholders(details);
                 return;
             }
             contextMeter.Visibility = Visibility.Visible;
-            RefreshCodexDetails();
+            RefreshDetails(details);
+        }
+
+        private void ApplyDeepSeekTaskDetails(AgentDetailsSnapshot details)
+        {
+            quotaGroup.Visibility = Visibility.Collapsed;
+            infoGroup.Visibility = Visibility.Collapsed;
+            contextMeter.Visibility = Visibility.Collapsed;
+
+            string taskTitle = String.IsNullOrWhiteSpace(details.TaskTitle)
+                ? L10n.Instance[LocalizedKeyOrDefault(details.TaskTitleKey,
+                    "details.deepseek.title.no_task")]
+                : details.TaskTitle;
+            string modelName = String.IsNullOrWhiteSpace(details.ModelName)
+                ? L10n.Instance[LocalizedKeyOrDefault(details.ModelNameKey,
+                    "details.deepseek.model.not_fetched")]
+                : details.ModelName;
+            deepSeekTaskValue.Text = taskTitle;
+            deepSeekTaskValue.ToolTip = taskTitle;
+            AutomationProperties.SetName(deepSeekTaskValue,
+                deepSeekTaskLabel.Text);
+            AutomationProperties.SetHelpText(deepSeekTaskValue, taskTitle);
+
+            deepSeekModelValue.Text = modelName;
+            string modelSource = String.IsNullOrWhiteSpace(
+                details.ModelSourceKey) ? String.Empty :
+                L10n.Instance[details.ModelSourceKey];
+            deepSeekModelValue.ToolTip = String.IsNullOrEmpty(modelSource)
+                ? modelName : modelName + Environment.NewLine + modelSource;
+            AutomationProperties.SetName(deepSeekModelValue,
+                deepSeekModelLabel.Text);
+            AutomationProperties.SetHelpText(deepSeekModelValue,
+                deepSeekModelValue.ToolTip.ToString());
+            deepSeekGroup.Visibility = Visibility.Visible;
+        }
+
+        private static string LocalizedKeyOrDefault(string key,
+            string fallbackKey)
+        {
+            return String.IsNullOrWhiteSpace(key) ? fallbackKey : key;
+        }
+
+        private static bool IsDeepSeekTask(AgentProviderSnapshot snapshot)
+        {
+            return snapshot != null && snapshot.Details != null &&
+                snapshot.Details.Mode == AgentDetailsMode.DeepSeekTask;
         }
 
         private static bool IsOfflineAggregate(AggregateSnapshot aggregate)
@@ -408,10 +777,10 @@ public sealed class DetailsWindow : Window
                     StringComparison.OrdinalIgnoreCase);
         }
 
-        private void ApplyOfflinePlaceholders()
+        private void ApplyOfflinePlaceholders(AgentDetailsSnapshot details)
         {
-            CodexCustomApiMetrics codexMetrics = ReadCodexCustomMetrics();
-            if (codexMetrics != null && codexMetrics.IsCustomApi)
+            if (details != null &&
+                details.Mode == AgentDetailsMode.Information)
             {
                 quotaGroup.Visibility = Visibility.Collapsed;
                 infoGroup.Visibility = Visibility.Visible;
@@ -426,7 +795,7 @@ public sealed class DetailsWindow : Window
             }
             else
             {
-                RefreshQuota();
+                RefreshQuota(details == null ? null : details.Usage);
             }
             // Drop the context pill rather than echoing a percentage from the
             // session that just went offline. Done after RefreshQuota since
@@ -434,31 +803,18 @@ public sealed class DetailsWindow : Window
             contextMeter.Visibility = Visibility.Collapsed;
         }
 
-        private void RefreshCodexDetails()
+        private void RefreshDetails(AgentDetailsSnapshot details)
         {
-            CodexCustomApiMetrics metrics = ReadCodexCustomMetrics();
-            if (metrics != null && metrics.IsCustomApi)
+            if (details != null &&
+                details.Mode == AgentDetailsMode.Information)
             {
-                ApplyCodexCustomMetrics(metrics);
+                ApplyInformationDetails(details);
                 return;
             }
-            RefreshQuota();
+            RefreshQuota(details == null ? null : details.Usage);
         }
 
-        private CodexCustomApiMetrics ReadCodexCustomMetrics()
-        {
-            if (previewCodexCustomMetrics != null)
-            {
-                return previewCodexCustomMetrics;
-            }
-            if (previewMetrics != null)
-            {
-                return new CodexCustomApiMetrics { IsCustomApi = false };
-            }
-            return CodexCustomApiMetricsReader.Read(currentSessions);
-        }
-
-        private void ApplyCodexCustomMetrics(CodexCustomApiMetrics metrics)
+        private void ApplyInformationDetails(AgentDetailsSnapshot details)
         {
             quotaGroup.Visibility = Visibility.Collapsed;
             infoGroup.Visibility = Visibility.Visible;
@@ -467,30 +823,22 @@ public sealed class DetailsWindow : Window
             infoModelSeparator.Visibility = Visibility.Visible;
             infoModelRow.Margin = new Thickness(0);
             infoTokenRow.Margin = new Thickness(0);
-            infoProjectValue.Text = metrics.HasProject
-                ? metrics.ProjectName : L10n.Instance["quota.no_data"];
-            infoModelValue.Text = metrics.HasModel
-                ? metrics.Model : L10n.Instance["quota.no_data"];
-            infoTokenValue.Text = metrics.HasTokenUsage
-                ? "↑ " + FormatCompactNumber(metrics.InputTokens) +
-                  "  ·  ↓ " + FormatCompactNumber(metrics.OutputTokens)
+            infoProjectValue.Text = details.HasProject
+                ? details.ProjectName : L10n.Instance["quota.no_data"];
+            infoModelValue.Text = details.HasModel
+                ? details.ModelName : L10n.Instance["quota.no_data"];
+            infoTokenValue.Text = details.HasTokenUsage
+                ? "↑ " + FormatCompactNumber(details.InputTokens) +
+                  "  ·  ↓ " + FormatCompactNumber(details.OutputTokens)
                 : L10n.Instance["quota.no_data"];
-            SetContextPercent(metrics.HasContext, metrics.ContextUsedPercent);
+            SetContextPercent(details.HasContext,
+                details.ContextUsedPercent);
         }
 
-        private void RefreshQuota()
+        private void RefreshQuota(UsageMetrics metrics)
         {
             quotaGroup.Visibility = Visibility.Visible;
             infoGroup.Visibility = Visibility.Collapsed;
-            UsageMetrics metrics;
-            if (previewMetrics != null)
-            {
-                metrics = previewMetrics;
-            }
-            else if (!CodexUsageMonitor.Instance.TryRead(out metrics))
-            {
-                metrics = null;
-            }
             if (metrics != null)
             {
                 ApplyQuotaMetrics(metrics);
@@ -503,19 +851,248 @@ public sealed class DetailsWindow : Window
             }
         }
 
-        private void OnCodexUsageUpdated()
+        private void RequestAgentFocus(AgentKind agent)
         {
-            if (Dispatcher.HasShutdownStarted || Dispatcher.HasShutdownFinished)
+            if (!agentSwitchingEnabled || !enabledAgentDescriptors.Any(
+                    delegate(AgentProviderDescriptor descriptor)
+                    {
+                        return descriptor.Kind == agent;
+                    }))
             {
                 return;
             }
-            Dispatcher.BeginInvoke(new Action(delegate
+            Action<AgentKind> handler = AgentFocusRequested;
+            if (handler != null)
             {
-                if (IsVisible && previewMetrics == null)
+                handler(agent);
+            }
+        }
+
+        private void ApplyAgentSwitchingState()
+        {
+            bool canSwitch = enabledAgentDescriptors.Count > 1;
+            bool useDropdown = enabledAgentDescriptors.Count > 2;
+            agentSelector.Visibility = canSwitch
+                ? Visibility.Visible : Visibility.Collapsed;
+            splitAgentSelector.Visibility = useDropdown
+                ? Visibility.Collapsed : Visibility.Visible;
+            dropdownAgentButton.Visibility = useDropdown
+                ? Visibility.Visible : Visibility.Collapsed;
+            firstSegmentButton.IsEnabled = agentSwitchingEnabled &&
+                firstSegmentAgent != null;
+            secondSegmentButton.IsEnabled = agentSwitchingEnabled &&
+                secondSegmentAgent != null;
+            dropdownAgentButton.IsEnabled = agentSwitchingEnabled;
+            foreach (object item in agentMenu.Items)
+            {
+                ((MenuItem)item).IsEnabled = agentSwitchingEnabled;
+            }
+        }
+
+        private void UpdateAgentSelector(AgentKind agent)
+        {
+            selectedAgent = agent;
+            firstSegmentAgent = enabledAgentDescriptors.Count == 2
+                ? enabledAgentDescriptors[0] : null;
+            secondSegmentAgent = enabledAgentDescriptors.Count == 2
+                ? enabledAgentDescriptors[1] : null;
+            SetSegmentOption(firstSegmentButton, firstSegmentText,
+                firstSegmentAgent, agent);
+            SetSegmentOption(secondSegmentButton, secondSegmentText,
+                secondSegmentAgent, agent);
+
+            AgentProviderDescriptor selected = enabledAgentDescriptors
+                .FirstOrDefault(delegate(AgentProviderDescriptor descriptor)
                 {
-                    RefreshCodexDetails();
-                }
-            }));
+                    return descriptor.Kind == agent;
+                });
+            string name = selected == null
+                ? L10n.Instance[AgentDisplayNameKey(agent)]
+                : FullAgentName(selected);
+            dropdownAgentText.Text = selected == null
+                ? L10n.Instance[AgentShortNameKey(agent)]
+                : ShortAgentName(selected);
+            AutomationProperties.SetName(dropdownAgentButton, name);
+            ToolTipService.SetToolTip(dropdownAgentButton, name);
+
+            foreach (MenuItem item in agentMenu.Items)
+            {
+                item.IsChecked = (AgentKind)item.Tag == agent;
+            }
+            ApplyAgentSwitchingState();
+        }
+
+        private void RebuildAgentMenu()
+        {
+            agentMenu.Items.Clear();
+            foreach (AgentProviderDescriptor descriptor in
+                enabledAgentDescriptors)
+            {
+                MenuItem item = new MenuItem
+                {
+                    Header = FullAgentName(descriptor),
+                    IsCheckable = true,
+                    IsChecked = descriptor.Kind == selectedAgent,
+                    Tag = descriptor.Kind,
+                    IsEnabled = agentSwitchingEnabled
+                };
+                AutomationProperties.SetName(item,
+                    FullAgentName(descriptor));
+                item.Click += delegate(object sender, RoutedEventArgs e)
+                {
+                    RequestAgentFocus((AgentKind)((MenuItem)sender).Tag);
+                };
+                agentMenu.Items.Add(item);
+            }
+        }
+
+        private static void SetSegmentOption(Button button, TextBlock text,
+            AgentProviderDescriptor descriptor, AgentKind selected)
+        {
+            if (descriptor == null)
+            {
+                text.Text = String.Empty;
+                button.Tag = false;
+                ToolTipService.SetToolTip(button, null);
+                AutomationProperties.SetName(button, String.Empty);
+                return;
+            }
+            string name = FullAgentName(descriptor);
+            text.Text = ShortAgentName(descriptor);
+            text.Foreground = new SolidColorBrush(
+                descriptor.Kind == selected
+                    ? MediaColor.FromRgb(34, 84, 113)
+                    : MediaColor.FromRgb(78, 94, 103));
+            button.Tag = descriptor.Kind == selected;
+            ToolTipService.SetToolTip(button, name);
+            AutomationProperties.SetName(button, name);
+        }
+
+        private static string AgentDisplayNameKey(AgentKind agent)
+        {
+            switch (agent)
+            {
+                case AgentKind.DeepSeekHarness:
+                    return "agent.deepseek-harness";
+                default: return "agent.codex";
+            }
+        }
+
+        private static string AgentShortNameKey(AgentKind agent)
+        {
+            return AgentDisplayNameKey(agent) + ".short";
+        }
+
+        private static Button CreateAgentSegmentButton(UIElement content,
+            Style style, string accessibleName)
+        {
+            Button button = new Button
+            {
+                Content = content,
+                Style = style,
+                Focusable = true,
+                IsTabStop = true,
+                HorizontalAlignment = HorizontalAlignment.Stretch,
+                VerticalAlignment = VerticalAlignment.Stretch,
+                HorizontalContentAlignment = HorizontalAlignment.Center,
+                VerticalContentAlignment = VerticalAlignment.Center,
+                Tag = false
+            };
+            AutomationProperties.SetName(button, accessibleName);
+            ToolTipService.SetToolTip(button, accessibleName);
+            return button;
+        }
+
+        private static Style CreateAgentSegmentStyle()
+        {
+            Style style = new Style(typeof(Button));
+            style.Setters.Add(new Setter(Control.BackgroundProperty,
+                System.Windows.Media.Brushes.Transparent));
+            style.Setters.Add(new Setter(Control.BorderBrushProperty,
+                System.Windows.Media.Brushes.Transparent));
+            style.Setters.Add(new Setter(Control.BorderThicknessProperty,
+                new Thickness(1)));
+            style.Setters.Add(new Setter(Control.PaddingProperty,
+                new Thickness(0)));
+            style.Setters.Add(new Setter(FrameworkElement.MarginProperty,
+                new Thickness(0)));
+            style.Setters.Add(new Setter(UIElement.FocusableProperty, true));
+            style.Setters.Add(new Setter(FrameworkElement.CursorProperty,
+                Cursors.Hand));
+
+            FrameworkElementFactory border =
+                new FrameworkElementFactory(typeof(Border));
+            border.SetValue(Border.CornerRadiusProperty, new CornerRadius(5));
+            border.SetBinding(Border.BackgroundProperty, new Binding("Background")
+            {
+                RelativeSource = new RelativeSource(
+                    RelativeSourceMode.TemplatedParent)
+            });
+            border.SetBinding(Border.BorderBrushProperty, new Binding("BorderBrush")
+            {
+                RelativeSource = new RelativeSource(
+                    RelativeSourceMode.TemplatedParent)
+            });
+            border.SetBinding(Border.BorderThicknessProperty,
+                new Binding("BorderThickness")
+                {
+                    RelativeSource = new RelativeSource(
+                        RelativeSourceMode.TemplatedParent)
+                });
+            FrameworkElementFactory presenter =
+                new FrameworkElementFactory(typeof(ContentPresenter));
+            presenter.SetValue(ContentPresenter.HorizontalAlignmentProperty,
+                HorizontalAlignment.Center);
+            presenter.SetValue(ContentPresenter.VerticalAlignmentProperty,
+                VerticalAlignment.Center);
+            presenter.SetBinding(ContentPresenter.ContentProperty,
+                new Binding("Content")
+                {
+                    RelativeSource = new RelativeSource(
+                        RelativeSourceMode.TemplatedParent)
+                });
+            border.AppendChild(presenter);
+            ControlTemplate template = new ControlTemplate(typeof(Button));
+            template.VisualTree = border;
+            style.Setters.Add(new Setter(Control.TemplateProperty, template));
+
+            Trigger selected = new Trigger
+            {
+                Property = FrameworkElement.TagProperty,
+                Value = true
+            };
+            selected.Setters.Add(new Setter(Control.BackgroundProperty,
+                new SolidColorBrush(MediaColor.FromArgb(175, 205, 230, 245))));
+            style.Triggers.Add(selected);
+
+            Trigger hovered = new Trigger
+            {
+                Property = UIElement.IsMouseOverProperty,
+                Value = true
+            };
+            hovered.Setters.Add(new Setter(Control.BackgroundProperty,
+                new SolidColorBrush(MediaColor.FromArgb(145, 218, 235, 245))));
+            style.Triggers.Add(hovered);
+
+            Trigger focused = new Trigger
+            {
+                Property = UIElement.IsKeyboardFocusedProperty,
+                Value = true
+            };
+            focused.Setters.Add(new Setter(Control.BorderBrushProperty,
+                new SolidColorBrush(MediaColor.FromRgb(73, 129, 160))));
+            style.Triggers.Add(focused);
+
+            Trigger disabled = new Trigger
+            {
+                Property = UIElement.IsEnabledProperty,
+                Value = false
+            };
+            disabled.Setters.Add(new Setter(UIElement.OpacityProperty, 0.42));
+            disabled.Setters.Add(new Setter(FrameworkElement.CursorProperty,
+                Cursors.Arrow));
+            style.Triggers.Add(disabled);
+            return style;
         }
 
         private void SetContextPercent(bool available, double value)
@@ -523,18 +1100,6 @@ public sealed class DetailsWindow : Window
             contextMeter.IsAvailable = available;
             contextMeter.Value = available
                 ? Math.Max(0, Math.Min(100, Math.Round(value))) : 0;
-        }
-
-        public void SetPreviewMetrics(UsageMetrics metrics)
-        {
-            previewMetrics = metrics;
-            RefreshQuota();
-        }
-
-        public void SetPreviewCodexCustomMetrics(CodexCustomApiMetrics metrics)
-        {
-            previewCodexCustomMetrics = metrics;
-            RefreshCodexDetails();
         }
 
         private void ApplyQuotaMetrics(UsageMetrics metrics)
@@ -661,6 +1226,27 @@ public sealed class DetailsWindow : Window
             return grid;
         }
 
+        private static Grid CreateDeepSeekRow(string labelKey,
+            out TextBlock label, out TextBlock value)
+        {
+            Grid row = new Grid();
+            row.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            row.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            label = NewText(L10n.Instance[labelKey], 12,
+                MediaColor.FromRgb(99, 112, 120), FontWeights.Normal, true);
+            label.HorizontalAlignment = HorizontalAlignment.Left;
+            label.VerticalAlignment = VerticalAlignment.Center;
+            row.Children.Add(label);
+            value = NewText(String.Empty, 12,
+                MediaColor.FromRgb(48, 60, 68), FontWeights.SemiBold, true);
+            value.HorizontalAlignment = HorizontalAlignment.Left;
+            value.VerticalAlignment = VerticalAlignment.Center;
+            value.Margin = new Thickness(0, 5, 0, 0);
+            Grid.SetRow(value, 1);
+            row.Children.Add(value);
+            return row;
+        }
+
 
         private static string FormatCompactNumber(long value)
         {
@@ -723,13 +1309,19 @@ public sealed class DetailsWindow : Window
 
         private void RefreshAllText()
         {
+            RebuildAgentMenu();
+            UpdateAgentSelector(selectedAgent);
             fiveHourLabel.Text = L10n.Instance["quota.5h"];
             longTermLabel.Text = L10n.Instance[longTermLabelKey];
             infoProjectTitle.Text = L10n.Instance["metadata.project"];
             infoModelTitle.Text = L10n.Instance["metadata.model"];
             infoTokenTitle.Text = L10n.Instance["metadata.tokens"];
-            if (currentAggregate != null)
-                UpdateContent(currentAggregate, currentSessions);
+            deepSeekTaskLabel.Text =
+                L10n.Instance["details.deepseek.task_label"];
+            deepSeekModelLabel.Text =
+                L10n.Instance["details.deepseek.main_model_label"];
+            if (currentSnapshot != null)
+                UpdateContent(currentSnapshot);
         }
     }
 }
