@@ -1,6 +1,6 @@
 # Agent Halo
 
-`v0.16.0` · English | [简体中文](README.zh-CN.md)
+`v0.16.5` · English | [简体中文](README.zh-CN.md)
 
 <img src="assets/agent-halo-windows-preview.png" alt="Agent Halo Windows details panel" width="594">
 
@@ -17,7 +17,7 @@ Based on [NePixe1/AgentHalo](https://github.com/NePixe1/AgentHalo), under the [M
 
 ## Use on Windows
 
-Requires Windows 10/11 and .NET Framework 4.8. Extract `outputs/AgentHalo-Windows-v0.16.0.zip`, keep the files together, and run `AgentHalo.exe`. Hover for details; right-click to switch agents or change settings.
+Requires Windows 10/11 and .NET Framework 4.8. Extract `outputs/AgentHalo-Windows-v0.16.5.zip`, keep the files together, and run `AgentHalo.exe`. Hover for details; right-click to switch agents or change settings.
 
 Codex is the default monitor. When a DSH desktop profile is first ready, Agent Halo registers its bundled observer and selects DSH. Later launches preserve your choice. See the [DSH integration guide](docs/DEEPSEEK_HARNESS_INTEGRATION.zh-CN.md) for setup and removal. Full monitoring of real DSH tasks has not yet been verified.
 

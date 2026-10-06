@@ -1,6 +1,6 @@
 # DeepSeek Harness 桌面端集成
 
-Agent Halo Windows `0.16.0` 默认选择 Codex。首次使用 DSH 时，Agent Halo 会等待 DSH 的 desktop profile 初始化完成，然后从程序包释放观察插件并将其登记到该 profile。首次登记成功后，Agent Halo 自动启用并选择 DSH；之后保留用户在 Agent Halo 中的选择。无需下载额外插件，也无需手动编辑 DSH 的 JSON/YAML 配置。DSH 需要与 Agent Halo 在同一 Windows 用户账户下运行。
+Agent Halo Windows `0.16.5` 默认选择 Codex。首次使用 DSH 时，Agent Halo 会等待 DSH 的 desktop profile 初始化完成，然后从程序包释放观察插件并将其登记到该 profile。首次登记成功后，Agent Halo 自动启用并选择 DSH；之后保留用户在 Agent Halo 中的选择。无需下载额外插件，也无需手动编辑 DSH 的 JSON/YAML 配置。DSH 需要与 Agent Halo 在同一 Windows 用户账户下运行。
 
 观察插件通过 DSH 官方 Cordis 插件入口读取当前 Host 的主会话与显式子代理关系，并把本地状态提供给 Agent Halo。插件不提交模型请求、不调用账户接口，也不收集或保存提示词、消息正文、工具参数和工具结果正文。详情面板显示任务名称和主代理模型。真实模型任务场景尚未完成端到端联调，DSH 窗口激活也未实现；因此当前资料说明的是可配置的实验性集成和验证边界，不代表真实任务已验证可用。
 
@@ -107,6 +107,6 @@ DSH 默认 profile 位于 `%USERPROFILE%\.dsh\profiles\desktop`。如设置了 `
 
 ## 实现状态与验证边界
 
-Agent Halo `0.16.0` 已包含自动释放与登记观察插件的逻辑，因此新电脑首次运行时不需要从其他电脑复制插件或配置。本次使用隔离的全新 DSH profile 和 Agent Halo 配置，验证了 EXE 首次启动自动登记、启用与选中 DSH；也验证了先启动 DSH 桌面 Host 后再打开 Agent Halo，插件无需重启即可热加载，原生读取器得到 `Healthy / STANDBY`。这些检查没有提交模型请求，证明的是首次接入与空闲状态读取链路。
+Agent Halo 自 `0.16.0` 起已包含自动释放与登记观察插件的逻辑，因此新电脑首次运行时不需要从其他电脑复制插件或配置。此前使用隔离的全新 DSH profile 和 Agent Halo 配置，验证了 EXE 首次启动自动登记、启用与选中 DSH；也验证了先启动 DSH 桌面 Host 后再打开 Agent Halo，插件无需重启即可热加载，原生读取器得到 `Healthy / STANDBY`。这些检查没有提交模型请求，证明的是首次接入与空闲状态读取链路。
 
 真实模型回复、工具调用与审批、问题继续、子代理/fork、运行中切换模型、桌面退出或休眠恢复、Host 重启等场景尚未端到端验证。模型目录名称未接入，详情显示模型 ID；DSH 窗口激活尚未实现。不得将空闲快照或离线断言当作真实任务验收。

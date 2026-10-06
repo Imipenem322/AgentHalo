@@ -1,6 +1,6 @@
 # Agent Halo
 
-`v0.16.0` · [English](README.md) | 简体中文
+`v0.16.5` · [English](README.md) | 简体中文
 
 <img src="assets/agent-halo-windows-preview.png" alt="Agent Halo Windows 详情面板" width="594">
 
@@ -17,7 +17,7 @@
 
 ## 使用（Windows）
 
-需要 Windows 10/11 和 .NET Framework 4.8。解压 `outputs/AgentHalo-Windows-v0.16.0.zip`，保持文件完整，运行 `AgentHalo.exe`。悬停查看详情，右键切换代理或调整设置。
+需要 Windows 10/11 和 .NET Framework 4.8。解压 `outputs/AgentHalo-Windows-v0.16.5.zip`，保持文件完整，运行 `AgentHalo.exe`。悬停查看详情，右键切换代理或调整设置。
 
 默认监测 Codex。首次发现 DSH desktop 配置就绪时，会自动登记内置观察插件并切换到 DSH；之后保留你的选择。接入和撤销方法见 [DSH 接入说明](docs/DEEPSEEK_HARNESS_INTEGRATION.zh-CN.md)。DSH 的真实任务全流程联调尚未完成。
 
