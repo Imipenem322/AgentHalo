@@ -4,7 +4,7 @@ public final class CodexSessionMonitor {
     private let sessionsRoot: URL
     private var reducers: [URL: SessionReducer] = [:]
     private var offsets: [URL: UInt64] = [:]
-    private var pending: [URL: String] = [:]
+    private var pending: [URL: Data] = [:]
     private var lastModified: [URL: Date] = [:]
     private var lastDiscoveryAt = Date.distantPast
     private var sessionTitleReader: CodexSessionTitleReader
@@ -61,9 +61,9 @@ public final class CodexSessionMonitor {
         var changed = false
         for url in recent where reducers[url] == nil {
             reducers[url] = SessionReducer(filePath: url.path(percentEncoded: false), liveTracking: false)
-            readInitialTail(from: url)
+            let initialReadEnd = readInitialTail(from: url)
             let meta = FastFileMetadata.read(url)
-            offsets[url] = meta?.size ?? 0
+            offsets[url] = initialReadEnd ?? 0
             lastModified[url] = meta?.modifiedAt
             reducers[url]?.setLiveTracking(true)
             changed = true
@@ -78,36 +78,26 @@ public final class CodexSessionMonitor {
         return changed
     }
 
-    private func readInitialTail(from url: URL) {
+    private func readInitialTail(from url: URL) -> UInt64? {
         guard let handle = try? FileHandle(forReadingFrom: url) else {
-            return
+            return nil
         }
         defer {
             try? handle.close()
         }
         let size = (try? handle.seekToEnd()) ?? 0
         let start = size > 393_216 ? size - 393_216 : 0
-        try? handle.seek(toOffset: start)
-        let data = (try? handle.readToEnd()) ?? Data()
-        guard var text = String(data: data, encoding: .utf8) else {
-            return
-        }
-        if start > 0, let firstNewline = text.firstIndex(of: "\n") {
-            text.removeSubrange(text.startIndex...firstNewline)
-        }
-        let complete = text.hasSuffix("\n")
-        var lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-        if !complete {
-            let trailing = lines.popLast() ?? ""
-            if !trailing.isEmpty {
-                pending[url] = trailing
+        do {
+            try handle.seek(toOffset: start)
+            let data = try handle.readToEnd() ?? Data()
+            var tail = data
+            if start > 0, let firstNewline = tail.firstIndex(of: 0x0A) {
+                tail = tail.subdata(in: tail.index(after: firstNewline)..<tail.endIndex)
             }
-        }
-        for line in lines {
-            let trimmed = line.trimmingCharacters(in: CharacterSet(charactersIn: "\r"))
-            if !trimmed.isEmpty {
-                reducers[url]?.consume(jsonLine: trimmed)
-            }
+            _ = processLines(in: tail, from: url)
+            return start + UInt64(data.count)
+        } catch {
+            return 0
         }
     }
 
@@ -135,29 +125,43 @@ public final class CodexSessionMonitor {
         do {
             try handle.seek(toOffset: previous)
             let data = try handle.readToEnd() ?? Data()
-            offsets[url] = current
+            let changed = processLines(in: data, from: url, now: now)
+            offsets[url] = previous + UInt64(data.count)
             lastModified[url] = mtime
-            guard let chunk = String(data: data, encoding: .utf8) else {
-                return false
-            }
-            let text = (pending[url] ?? "") + chunk
-            let complete = text.hasSuffix("\n")
-            var lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-            if !complete {
-                pending[url] = lines.popLast() ?? ""
-            } else {
-                pending[url] = nil
-            }
-            for line in lines {
-                let trimmed = line.trimmingCharacters(in: CharacterSet(charactersIn: "\r"))
-                if !trimmed.isEmpty {
-                    reducers[url]?.consume(jsonLine: trimmed, now: now)
-                }
-            }
-            return !lines.isEmpty
+            return changed
         } catch {
             AgentHaloLogger.log("Session refresh failed: \(error)")
             return false
         }
+    }
+
+    private func processLines(in data: Data, from url: URL, now: Date? = nil) -> Bool {
+        let combined = (pending[url] ?? Data()) + data
+        let parts = combined.split(separator: 0x0A, omittingEmptySubsequences: false)
+        let completeLines = parts.dropLast()
+        if combined.last.map({ $0 == 0x0A }) == true {
+            pending[url] = nil
+        } else if let trailing = parts.last {
+            let bytes = Data(trailing)
+            pending[url] = bytes.isEmpty ? nil : bytes
+        } else {
+            pending[url] = nil
+        }
+
+        for bytes in completeLines {
+            guard let line = String(data: Data(bytes), encoding: .utf8) else {
+                continue
+            }
+            let trimmed = line.trimmingCharacters(in: CharacterSet(charactersIn: "\r"))
+            guard !trimmed.isEmpty else {
+                continue
+            }
+            if let now {
+                reducers[url]?.consume(jsonLine: trimmed, now: now)
+            } else {
+                reducers[url]?.consume(jsonLine: trimmed)
+            }
+        }
+        return !completeLines.isEmpty
     }
 }

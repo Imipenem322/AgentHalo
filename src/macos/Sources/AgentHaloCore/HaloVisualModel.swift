@@ -25,11 +25,12 @@ public struct HaloMaterialSnapshot: Equatable, Sendable {
 
 public enum HaloVisualModel {
     public static func targetVisual(state: HaloState, time: Double, errorPresentation: ErrorPresentation, steadyDone: Bool) -> HaloVisualSnapshot {
+        let breath = HaloMath.stateBreath(state, time: time)
         var result = HaloVisualSnapshot(
             color: stateColor(state),
             powered: HaloMath.targetPowered(state, time: time),
-            breath: HaloMath.stateBreath(state, time: time),
-            intensity: 0.50 + HaloMath.stateBreath(state, time: time) * 0.18,
+            breath: breath,
+            intensity: 0.50 + breath * 0.18,
             bodyWidth: 8.6,
             coreWhite: coreWhite(for: state),
             glowGain: glowGain(for: state)

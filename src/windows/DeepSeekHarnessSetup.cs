@@ -17,7 +17,8 @@ internal sealed class DeepSeekHarnessSetup
         public string Error { get; private set; }
 
         public DeepSeekHarnessSetup()
-            : this(DesktopProfileDirectory(), SettingsStorage.AppDirectory)
+            : this(AgentHaloPaths.DeepSeekHarnessDesktopProfileDirectory(),
+                SettingsStorage.AppDirectory)
         {
         }
 
@@ -26,25 +27,6 @@ internal sealed class DeepSeekHarnessSetup
             profileDirectory = Path.GetFullPath(profile);
             observerPath = Path.Combine(Path.GetFullPath(appDirectory),
                 "integrations", "deepseek-harness", "observer", "index.mjs");
-        }
-
-        private static string DesktopProfileDirectory()
-        {
-            string root = Environment.GetEnvironmentVariable("DSH_HOME");
-            if (String.IsNullOrWhiteSpace(root))
-            {
-                root = Path.Combine(Environment.GetFolderPath(
-                    Environment.SpecialFolder.UserProfile), ".dsh");
-            }
-            else
-            {
-                root = root.Trim();
-                if (root == "~" || root.StartsWith("~/") || root.StartsWith("~\\"))
-                    root = Path.Combine(Environment.GetFolderPath(
-                        Environment.SpecialFolder.UserProfile),
-                        root.Length == 1 ? String.Empty : root.Substring(2));
-            }
-            return Path.Combine(root, "profiles", "desktop");
         }
 
         public bool TryInstall()

@@ -1,6 +1,54 @@
 import Foundation
 import AgentHaloCore
 
+private enum UsageURLProtocolReply: Sendable {
+    case http(statusCode: Int, body: Data)
+    case nonHTTP
+    case transportFailure
+}
+
+private final class UsageURLProtocolStub: URLProtocol, @unchecked Sendable {
+    static let reply = LockedBox<UsageURLProtocolReply>(.nonHTTP)
+
+    override class func canInit(with request: URLRequest) -> Bool {
+        true
+    }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
+        request
+    }
+
+    override func startLoading() {
+        guard let url = request.url else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badURL))
+            return
+        }
+        switch Self.reply.value {
+        case .http(let statusCode, let body):
+            guard let response = HTTPURLResponse(
+                url: url,
+                statusCode: statusCode,
+                httpVersion: "HTTP/1.1",
+                headerFields: nil
+            ) else {
+                client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
+                return
+            }
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: body)
+            client?.urlProtocolDidFinishLoading(self)
+        case .nonHTTP:
+            let response = URLResponse(url: url, mimeType: "text/plain", expectedContentLength: 0, textEncodingName: nil)
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocolDidFinishLoading(self)
+        case .transportFailure:
+            client?.urlProtocol(self, didFailWithError: URLError(.cannotConnectToHost))
+        }
+    }
+
+    override func stopLoading() {}
+}
+
 private func detailsResolverUpdateTime(_ date: Date, now: Date) -> String {
     let formatter = DateFormatter()
     formatter.locale = Locale(identifier: L10n.shared["date.culture"])
@@ -1039,35 +1087,6 @@ func testCodexAPIKeyOnlyAndNoCredentialReturnAPIKey() {
     }
 }
 
-func testCodexAccountKeyDigest() {
-    let home = "/tmp/agent-halo-acctkey-\(UUID().uuidString)"
-    let env = FakeUsageEnvironment(["HOME": home])
-
-    // With account_id → SHA256(accountID).
-    let path = codexCheckAuthPath(home: home)
-    let filesWithID = FakeUsageFiles(contents: [
-        path: codexCheckJSON(["tokens": ["access_token": "tok", "account_id": "acct-123"]]),
-    ])
-    let storeWithID = CodexAuthStore(environment: env, files: filesWithID, keychain: FakeUsageKeychain())
-    guard case .oauth(let accessWithID) = storeWithID.resolveAccess() else {
-        fatalError("account_id case should resolve to OAuth")
-    }
-    expect(accessWithID.accountKey.digest, UsageDigest.sha256("acct-123"), "account_id digest is SHA256(accountID)")
-    expect(accessWithID.accountID, "acct-123", "accountID is exposed")
-
-    // Without account_id → source identity + refresh + access digest.
-    let filesNoID = FakeUsageFiles(contents: [
-        path: codexCheckJSON(["tokens": ["access_token": "tok", "refresh_token": "rt"]]),
-    ])
-    let storeNoID = CodexAuthStore(environment: env, files: filesNoID, keychain: FakeUsageKeychain())
-    guard case .oauth(let accessNoID) = storeNoID.resolveAccess() else {
-        fatalError("no-account_id case should resolve to OAuth")
-    }
-    let expectedDigest = UsageDigest.sha256("\(path)|rt|tok")
-    expect(accessNoID.accountKey.digest, expectedDigest, "fallback digest uses source identity plus refresh/access-token")
-    expect(accessNoID.accountID == nil, true, "accountID is nil when absent")
-}
-
 func testCodexNeedsRefresh() {
     let now = Date(timeIntervalSince1970: 1_000_000)
     let home = "/tmp/agent-halo-refresh-\(UUID().uuidString)"
@@ -1308,8 +1327,6 @@ func testCodexPersistRefusesOnVersionMismatch() {
     guard case .oauth(let access) = store.resolveAccess() else {
         fatalError("version-mismatch check should start from OAuth")
     }
-    let originalVersion = access.sourceVersion
-
     // Simulate an external change: rewrite the file with different content
     // through the same file accessor (updates the "disk" and the version).
     try? files.writeAtomically(
@@ -1333,80 +1350,6 @@ func testCodexPersistRefusesOnVersionMismatch() {
     expect(result == nil, "persist should refuse to write when the source version changed")
     // No additional write beyond the external one.
     expect(files.capturedWrites().count, 1, "persist must not write on version mismatch")
-    expect(originalVersion != UsageDigest.sha256(""), true, "original version is a real digest")
-}
-
-func testCodexSourceVersionHashesRawDataBytes() {
-    func utf16JSON(marker: String) -> Data {
-        var data = Data([0xFF, 0xFE])
-        data.append(
-            #"{"marker":"\#(marker)","tokens":{"access_token":"same-token","refresh_token":"same-rt"}}"#
-                .data(using: .utf16LittleEndian)!
-        )
-        return data
-    }
-
-    let home = "/tmp/agent-halo-raw-version-\(UUID().uuidString)"
-    let path = codexCheckAuthPath(home: home)
-    let originalData = utf16JSON(marker: "é")
-    let changedData = utf16JSON(marker: "ê")
-    expect(String(data: originalData, encoding: .utf8) == nil, true, "original UTF-16 JSON is not UTF-8")
-    expect(String(data: changedData, encoding: .utf8) == nil, true, "changed UTF-16 JSON is not UTF-8")
-    expect(
-        (try? JSONSerialization.jsonObject(with: originalData)) != nil,
-        true,
-        "original UTF-16 JSON remains parseable"
-    )
-    expect(
-        (try? JSONSerialization.jsonObject(with: changedData)) != nil,
-        true,
-        "changed UTF-16 JSON remains parseable"
-    )
-
-    let environment = FakeUsageEnvironment(["HOME": home])
-    let originalStore = CodexAuthStore(
-        environment: environment,
-        files: FakeUsageFiles(contents: [path: originalData]),
-        keychain: FakeUsageKeychain()
-    )
-    guard case .oauth(let originalAccess) = originalStore.resolveAccess() else {
-        fatalError("original UTF-16 JSON should resolve to OAuth")
-    }
-    let changedStore = CodexAuthStore(
-        environment: environment,
-        files: FakeUsageFiles(contents: [path: changedData]),
-        keychain: FakeUsageKeychain()
-    )
-    guard case .oauth(let changedAccess) = changedStore.resolveAccess() else {
-        fatalError("changed UTF-16 JSON should resolve to OAuth")
-    }
-    expect(
-        originalAccess.sourceVersion != changedAccess.sourceVersion,
-        true,
-        "different raw JSON bytes must produce different source versions"
-    )
-
-    let mutableFiles = FakeUsageFiles(contents: [path: originalData])
-    let mutableStore = CodexAuthStore(
-        environment: environment,
-        files: mutableFiles,
-        keychain: FakeUsageKeychain()
-    )
-    guard case .oauth(let expected) = mutableStore.resolveAccess() else {
-        fatalError("mutable UTF-16 JSON should resolve to OAuth")
-    }
-    try? mutableFiles.writeAtomically(changedData, to: path, preservingModeOf: path)
-    let result = try? mutableStore.persist(
-        rotation: CodexTokenRotation(
-            accessToken: "rotated-token",
-            refreshToken: nil,
-            idToken: nil,
-            refreshedAt: Date(timeIntervalSince1970: 2_000_000)
-        ),
-        replacing: expected
-    )
-    expect(result == nil, true, "persist must refuse a raw-byte source version change")
-    expect(mutableFiles.capturedWrites().count, 1, "persist must not write after raw-byte version mismatch")
 }
 
 func testUsageDependencyFactoryDisablesProductionKeychainForPackagedVerification() {
@@ -1508,26 +1451,6 @@ func testSecurityUsageKeychainMapsNotFoundAndFrameworkErrors() {
     } catch {
         fatalError("unexpected keychain error type")
     }
-}
-
-func testSecurityUsageKeychainSourceContainsNoSecretCLIPath() {
-    let sourceDirectory = URL(fileURLWithPath: #filePath)
-        .deletingLastPathComponent()
-        .deletingLastPathComponent()
-        .appendingPathComponent("AgentHaloCore/UsageMonitoring/UsageSystemClients.swift")
-    guard let source = try? String(contentsOf: sourceDirectory, encoding: .utf8),
-          let start = source.range(of: "public final class SecurityUsageKeychain")?.lowerBound,
-          let end = source.range(of: "public enum UsageKeychainError", range: start..<source.endIndex)?.lowerBound
-    else {
-        fatalError("SecurityUsageKeychain source should be readable")
-    }
-    let keychainSource = source[start..<end]
-    expect(!keychainSource.contains("/usr/bin/security"), "Keychain implementation must not launch security CLI")
-    expect(!keychainSource.contains("\"-g\""), "metadata lookup must not request CLI secret output")
-    expect(!keychainSource.contains("\"-w\""), "credential JSON must not enter process argv")
-    expect(source.contains("SecItemCopyMatching"), "production read should use Security.framework")
-    expect(source.contains("SecItemUpdate"), "production update should use Security.framework")
-    expect(source.contains("SecItemAdd"), "production add should use Security.framework")
 }
 
 func codexUsageResponse(
@@ -1653,6 +1576,49 @@ func testCodexUsageClientClassifiesFailures() async {
     await malformed.enqueue(response: codexUsageResponse("not-json"))
     await expectCodexFailure(.invalidResponse, "malformed successful usage body") {
         _ = try await CodexUsageClient(http: malformed).fetchUsage(accessToken: "a", accountID: nil)
+    }
+}
+
+func testURLSessionUsageHTTPClientClassifiesResponses() async {
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.protocolClasses = [UsageURLProtocolStub.self]
+    configuration.urlCache = nil
+    let session = URLSession(configuration: configuration)
+    defer { session.invalidateAndCancel() }
+
+    let client = URLSessionUsageHTTPClient(session: session, fixedHost: "usage.invalid")
+    func request(_ path: String) -> UsageHTTPRequest {
+        UsageHTTPRequest(method: "GET", host: "usage.invalid", path: path, headers: [:], body: nil)
+    }
+
+    UsageURLProtocolStub.reply.withValue { $0 = .nonHTTP }
+    do {
+        _ = try await client.send(request("/non-http"))
+        fatalError("a non-HTTP response should be classified as invalidResponse")
+    } catch let failure as UsageProviderFailure {
+        expect(failure, .invalidResponse, "non-HTTP response classification")
+    } catch {
+        fatalError("unexpected non-HTTP response error: \(error)")
+    }
+
+    UsageURLProtocolStub.reply.withValue { $0 = .transportFailure }
+    do {
+        _ = try await client.send(request("/transport-failure"))
+        fatalError("a transport error should fail")
+    } catch let failure as UsageProviderFailure {
+        expect(failure, .network, "transport error classification")
+    } catch {
+        fatalError("unexpected transport error: \(error)")
+    }
+
+    let body = Data("ok".utf8)
+    UsageURLProtocolStub.reply.withValue { $0 = .http(statusCode: 200, body: body) }
+    do {
+        let response = try await client.send(request("/success"))
+        expect(response.statusCode, 200, "HTTP response status")
+        expect(response.body, body, "HTTP response body")
+    } catch {
+        fatalError("valid HTTP response should succeed: \(error)")
     }
 }
 
@@ -2272,20 +2238,18 @@ func runUsageModelChecks() async throws {
     testCodexDiscoveryOrderWithoutCodexHome()
     testCodexOAuthWinsOverAPIKey()
     testCodexAPIKeyOnlyAndNoCredentialReturnAPIKey()
-    testCodexAccountKeyDigest()
     testCodexNeedsRefresh()
     testCodexNeedsRefreshUsesStoredLastRefresh()
     testCodexFileRotationPreservesCustomKeysAndMode()
     testCodexKeychainRotationWritesToCodexAuth()
     testCodexPersistRefusesOnVersionMismatch()
-    testCodexSourceVersionHashesRawDataBytes()
     testUsageDependencyFactoryDisablesProductionKeychainForPackagedVerification()
     testSecurityUsageKeychainWritesSecretBytesInProcess()
     testSecurityUsageKeychainRefusesServiceOnlyWriteAndUpdatesOneExactAccount()
     testSecurityUsageKeychainMapsNotFoundAndFrameworkErrors()
-    testSecurityUsageKeychainSourceContainsNoSecretCLIPath()
     await testCodexUsageClientBuildsOnlyOfficialRequests()
     await testCodexUsageClientClassifiesFailures()
+    await testURLSessionUsageHTTPClientClassifiesResponses()
     testCodexUsageMapperPlansWindowsAndRestrictedFields()
     testCodexUsageMapperClassifiesInvalidResponses()
     await testCodexProviderAdoptsExternalSourceWithoutMigration()

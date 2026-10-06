@@ -670,17 +670,39 @@ func testMonitorHandlesPendingLinesAndTruncation() throws {
     _ = monitor.refresh(now: now)
     expect(monitor.snapshots().first?.state == .idle, "partial line should wait for newline")
 
-    try FileHandle(forWritingTo: file).withClose {
-        try $0.seekToEnd()
-        try $0.write(contentsOf: Data("\n".utf8))
+    func append(_ data: Data) throws {
+        try FileHandle(forWritingTo: file).withClose {
+            try $0.seekToEnd()
+            try $0.write(contentsOf: data)
+        }
     }
+
+    try append(Data("\n".utf8))
     _ = monitor.refresh(now: now.addingTimeInterval(1))
     expect(monitor.snapshots().first?.state == .thinking, "completed pending line should parse")
     expect(monitor.snapshots().first?.agent, .codex, "Codex monitor snapshots should carry Codex agent")
 
-    try Data(#"{"timestamp":"2026-06-13T02:00:02Z","type":"event_msg","payload":{"type":"task_complete"}}"#.utf8).write(to: file)
+    let unicodeEvent = #"{"timestamp":"2026-06-13T02:00:02Z","type":"event_msg","payload":{"type":"task_complete","message":"你"}}"#
+    let unicodeStart = unicodeEvent.range(of: "你")!.lowerBound
+    let unicodeByteOffset = unicodeEvent.utf8.distance(from: unicodeEvent.utf8.startIndex, to: unicodeStart)
+    let unicodeBytes = Data(unicodeEvent.utf8)
+    try append(Data(unicodeBytes.prefix(unicodeByteOffset + 1)))
     _ = monitor.refresh(now: now.addingTimeInterval(2))
-    expect(monitor.snapshots().first?.state == .idle, "truncated partial line should not parse")
+    expect(monitor.snapshots().first?.state == .thinking, "partial UTF-8 character should wait for remaining bytes")
+
+    try append(Data(unicodeBytes.dropFirst(unicodeByteOffset + 1)) + Data([0x0A]))
+    _ = monitor.refresh(now: now.addingTimeInterval(3))
+    expect(monitor.snapshots().first?.state == .idle, "completed UTF-8 event should parse after the remaining bytes arrive")
+    expect(monitor.refresh(now: now.addingTimeInterval(3.5)), false, "completed UTF-8 event should not be processed again")
+
+    let nextEvent = Data(#"{"timestamp":"2026-06-13T02:00:04Z","type":"event_msg","payload":{"type":"task_started"}}"#.utf8)
+    try append(Data([0xFF, 0x0A]) + nextEvent + Data([0x0A]))
+    _ = monitor.refresh(now: now.addingTimeInterval(4))
+    expect(monitor.snapshots().first?.state == .thinking, "a malformed UTF-8 line should not block the following event")
+
+    try Data(#"{"timestamp":"2026-06-13T02:00:05Z","type":"event_msg","payload":{"type":"task_complete"}}"#.utf8).write(to: file)
+    _ = monitor.refresh(now: now.addingTimeInterval(5))
+    expect(monitor.snapshots().first?.state == .idle, "truncation should reset the reducer and pending bytes")
 }
 
 func testAggregatorHidesAcknowledgedErrorsAndShowsStandbyInput() {

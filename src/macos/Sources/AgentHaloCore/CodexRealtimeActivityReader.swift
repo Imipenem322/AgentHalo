@@ -95,7 +95,7 @@ public struct CodexRealtimeActivityReader: Sendable {
             }
             if eventType == "response.output_item.added",
                !completedItemIds.contains(event.itemId) {
-                if Self.isAttentionToolName(event.name) {
+                if CodexAttentionHeuristics.isAttentionToolName(event.name) {
                     return CodexRealtimeActivity(state: .attention, action: "Needs you")
                 }
                 if event.itemType == "function_call"
@@ -147,8 +147,8 @@ public struct CodexRealtimeActivityReader: Sendable {
             || eventType == "response.function_call_arguments.done" {
             let itemId = (root["item_id"] as? String) ?? ""
             let delta = (root["delta"] as? String) ?? ""
-            let hint = isEscalatedArgumentsFragment(delta)
-                || isEscalatedArgumentsFragment(body)
+            let hint = CodexAttentionHeuristics.isEscalatedArgumentsFragment(delta)
+                || CodexAttentionHeuristics.isEscalatedArgumentsFragment(body)
             guard !itemId.isEmpty else { return nil }
             return RealtimeEvent(
                 type: eventType,
@@ -168,26 +168,6 @@ public struct CodexRealtimeActivityReader: Sendable {
             attentionHint: false,
             delta: (root["delta"] as? String) ?? ""
         )
-    }
-
-    private static func isAttentionToolName(_ name: String) -> Bool {
-        let lower = name.lowercased()
-        if lower == "request_user_input" {
-            return true
-        }
-        return lower.contains("approval")
-            || lower.contains("permission")
-            || lower.contains("request_user")
-            || lower.contains("needs_input")
-    }
-
-    private static func isEscalatedArgumentsFragment(_ value: String) -> Bool {
-        guard !value.isEmpty,
-              value.range(of: "require_escalated", options: .caseInsensitive) != nil else {
-            return false
-        }
-        return value.range(of: "sandbox_permissions", options: .caseInsensitive) != nil
-            || value.range(of: "justification", options: .caseInsensitive) != nil
     }
 
     /// True only when a streamed text delta *is* a context-compaction label

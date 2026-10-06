@@ -56,7 +56,6 @@ public sealed class CodexUsageMonitor : IDisposable
                 LazyThreadSafetyMode.ExecutionAndPublication);
 
         private readonly object gate = new object();
-        private readonly JavaScriptSerializer serializer = new JavaScriptSerializer();
         private readonly Timer refreshTimer;
         private readonly Timer localSnapshotTimer;
         private UsageMetrics remoteMetrics;
@@ -82,12 +81,10 @@ public sealed class CodexUsageMonitor : IDisposable
             get { return lazyInstance.IsValueCreated; }
         }
 
-        public event Action Updated;
         public event Action<long> UpdatedForActivation;
 
         private CodexUsageMonitor()
         {
-            serializer.MaxJsonLength = Int32.MaxValue;
             LoadMatchingCache();
             refreshTimer = new Timer(delegate { RequestRefresh(); }, null,
                 Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
@@ -182,20 +179,10 @@ public sealed class CodexUsageMonitor : IDisposable
 
         public bool TryReadCached(out UsageMetrics metrics)
         {
-            UsageMetrics local = null;
-            UsageMetrics remote = null;
             lock (gate)
             {
-                if (localMetrics != null)
-                {
-                    local = Clone(localMetrics);
-                }
-                if (remoteMetrics != null)
-                {
-                    remote = Clone(remoteMetrics);
-                }
+                metrics = Merge(localMetrics, remoteMetrics, DateTime.UtcNow);
             }
-            metrics = Merge(local, remote, DateTime.UtcNow);
             return HasAny(metrics);
         }
 
@@ -817,7 +804,6 @@ public sealed class CodexUsageMonitor : IDisposable
 
         private void RaiseUpdated(long expectedEpoch)
         {
-            Action handler;
             Action<long> scopedHandler;
             lock (gate)
             {
@@ -825,7 +811,6 @@ public sealed class CodexUsageMonitor : IDisposable
                 {
                     return;
                 }
-                handler = Updated;
                 scopedHandler = UpdatedForActivation;
             }
             if (scopedHandler != null)
@@ -833,16 +818,6 @@ public sealed class CodexUsageMonitor : IDisposable
                 try
                 {
                     scopedHandler(expectedEpoch);
-                }
-                catch
-                {
-                }
-            }
-            if (handler != null)
-            {
-                try
-                {
-                    handler();
                 }
                 catch
                 {
@@ -908,14 +883,14 @@ internal static class CodexAuthStore
                 byte[] bytes = File.ReadAllBytes(path);
                 Dictionary<string, object> root = Serializer.DeserializeObject(
                     Encoding.UTF8.GetString(bytes)) as Dictionary<string, object>;
-                Dictionary<string, object> tokens = Child(root, "tokens");
-                string accessToken = Text(tokens, "access_token");
+                Dictionary<string, object> tokens = CodexUsageJson.Child(root, "tokens");
+                string accessToken = CodexUsageJson.Text(tokens, "access_token").Trim();
                 if (String.IsNullOrWhiteSpace(accessToken))
                 {
                     return null;
                 }
-                string refreshToken = Text(tokens, "refresh_token");
-                string accountId = Text(tokens, "account_id");
+                string refreshToken = CodexUsageJson.Text(tokens, "refresh_token").Trim();
+                string accountId = CodexUsageJson.Text(tokens, "account_id").Trim();
                 string sourceVersion = Sha256(bytes);
                 string accountKey = !String.IsNullOrWhiteSpace(accountId)
                     ? Sha256(accountId)
@@ -929,7 +904,7 @@ internal static class CodexAuthStore
                     AccountId = accountId,
                     AccountKey = accountKey,
                     ExpiresUtc = JwtExpiry(accessToken),
-                    LastRefreshUtc = ParseDate(Text(root, "last_refresh")),
+                    LastRefreshUtc = ParseDate(CodexUsageJson.Text(root, "last_refresh").Trim()),
                     Document = root
                 };
             }
@@ -965,7 +940,7 @@ internal static class CodexAuthStore
                     return null;
                 }
                 Dictionary<string, object> root = current.Document;
-                Dictionary<string, object> tokens = Child(root, "tokens");
+                Dictionary<string, object> tokens = CodexUsageJson.Child(root, "tokens");
                 if (tokens == null)
                 {
                     tokens = new Dictionary<string, object>();
@@ -1022,22 +997,6 @@ internal static class CodexAuthStore
             string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
             yield return Path.Combine(home, ".config", "codex", "auth.json");
             yield return Path.Combine(home, ".codex", "auth.json");
-        }
-
-        private static Dictionary<string, object> Child(
-            Dictionary<string, object> parent, string key)
-        {
-            object value;
-            return parent != null && parent.TryGetValue(key, out value)
-                ? value as Dictionary<string, object> : null;
-        }
-
-        private static string Text(Dictionary<string, object> parent, string key)
-        {
-            object value;
-            return parent != null && parent.TryGetValue(key, out value) && value != null
-                ? Convert.ToString(value, CultureInfo.InvariantCulture).Trim()
-                : String.Empty;
         }
 
         private static DateTime ParseDate(string value)
@@ -1300,14 +1259,14 @@ internal static class CodexUsageSnapshotCache
             try
             {
                 Dictionary<string, object> root = ReadRoot();
-                Dictionary<string, object> accounts = Child(root, "accounts");
-                Dictionary<string, object> item = Child(accounts, accountKey);
+                Dictionary<string, object> accounts = CodexUsageJson.Child(root, "accounts");
+                Dictionary<string, object> item = CodexUsageJson.Child(accounts, accountKey);
                 if (item == null)
                 {
                     return false;
                 }
                 DateTime parsed;
-                if (!DateTime.TryParse(Text(item, "refreshed_at"),
+                if (!DateTime.TryParse(CodexUsageJson.Text(item, "refreshed_at"),
                     CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind,
                     out parsed))
                 {
@@ -1315,8 +1274,8 @@ internal static class CodexUsageSnapshotCache
                 }
                 refreshedUtc = parsed.ToUniversalTime();
                 metrics = new UsageMetrics { ContextInputTokens = -1 };
-                ReadWindow(Child(item, "session"), true, metrics);
-                ReadWindow(Child(item, "weekly"), false, metrics);
+                ReadWindow(CodexUsageJson.Child(item, "session"), true, metrics);
+                ReadWindow(CodexUsageJson.Child(item, "weekly"), false, metrics);
                 return metrics.HasFiveHour || metrics.HasWeekly;
             }
             catch
@@ -1335,7 +1294,7 @@ internal static class CodexUsageSnapshotCache
                 Directory.CreateDirectory(SettingsStorage.AppDirectory);
                 Dictionary<string, object> root = ReadRoot();
                 root["version"] = 1;
-                Dictionary<string, object> accounts = Child(root, "accounts");
+                Dictionary<string, object> accounts = CodexUsageJson.Child(root, "accounts");
                 if (accounts == null)
                 {
                     accounts = new Dictionary<string, object>();
@@ -1402,13 +1361,13 @@ internal static class CodexUsageSnapshotCache
             bool session, UsageMetrics metrics)
         {
             double used;
-            if (source == null || !Double.TryParse(Text(source, "used_percent"),
+            if (source == null || !Double.TryParse(CodexUsageJson.Text(source, "used_percent"),
                 NumberStyles.Float, CultureInfo.InvariantCulture, out used))
             {
                 return;
             }
             DateTime reset;
-            DateTime.TryParse(Text(source, "resets_at"), CultureInfo.InvariantCulture,
+            DateTime.TryParse(CodexUsageJson.Text(source, "resets_at"), CultureInfo.InvariantCulture,
                 DateTimeStyles.RoundtripKind, out reset);
             if (session)
             {
@@ -1437,7 +1396,11 @@ internal static class CodexUsageSnapshotCache
                 ?? new Dictionary<string, object>();
         }
 
-        private static Dictionary<string, object> Child(
+    }
+
+internal static class CodexUsageJson
+    {
+        internal static Dictionary<string, object> Child(
             Dictionary<string, object> source, string key)
         {
             object value;
@@ -1445,7 +1408,7 @@ internal static class CodexUsageSnapshotCache
                 ? value as Dictionary<string, object> : null;
         }
 
-        private static string Text(Dictionary<string, object> source, string key)
+        internal static string Text(Dictionary<string, object> source, string key)
         {
             object value;
             return source != null && source.TryGetValue(key, out value) && value != null

@@ -209,14 +209,6 @@ final class HaloView: NSView {
         redrawRing()
     }
 
-    var usesCommonRunLoopAnimationDriverForChecks: Bool {
-        animationTimer != nil
-    }
-
-    var hasAnimationDriverForChecks: Bool {
-        animationTimer != nil
-    }
-
     func advanceAnimationForChecks(delta: Double) {
         guard !systemOverlaySuspended else {
             return

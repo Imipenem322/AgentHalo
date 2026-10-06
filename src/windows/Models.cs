@@ -127,7 +127,6 @@ public sealed class AggregateSnapshot
         public string Label;
         public string Detail;
         public List<SessionSnapshot> Sessions;
-        public bool AnswerStreaming;
         public AgentKind FocusedAgent;
         public AgentPresenceState Presence;
         public AgentTurnPhase TurnPhase;

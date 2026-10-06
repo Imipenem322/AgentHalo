@@ -51,8 +51,6 @@ public sealed class HaloVisual : FrameworkElement
         private VisualSnapshot transitionFromVisual;
         private VisualSnapshot renderedVisual;
         private bool hasRenderedFrame;
-        private string label;
-        private int count;
         private bool isRendering;
         private double testTime;
         private double testSinceState;
@@ -84,7 +82,6 @@ public sealed class HaloVisual : FrameworkElement
         private double smallGapInertiaVelocity;
         private double energy;
         private bool steadyDone;
-        private bool answerStreaming;
         private ErrorPresentation errorPresentation;
 
         public HaloVisual()
@@ -97,7 +94,6 @@ public sealed class HaloVisual : FrameworkElement
             transitionStartSeconds = -10;
             transitionDuration = 1;
             renderedVisual.Color = transitionFromColor;
-            label = CodexSessionMonitor.StateLabel(HaloState.Idle);
             energy = TargetEnergy(HaloState.Idle);
             outerPhase = 97;
             gapSeparation = GeneratedHaloSpec.MaximumGapSeparation;
@@ -157,20 +153,18 @@ public sealed class HaloVisual : FrameworkElement
             gen2AtReset = GC.CollectionCount(2);
         }
 
-        public void SetState(HaloState value, string stateLabel, int sessionCount)
+        public void SetState(HaloState value)
         {
             if (state != value)
             {
                 double now = clock.Elapsed.TotalSeconds;
-                CaptureTransitionStart(now);
+                CaptureTransitionStart();
                 previousState = state;
                 state = value;
                 stateChangedUtc = DateTime.UtcNow;
                 transitionStartSeconds = now;
-                transitionDuration = TransitionDuration(previousState, state);
+                transitionDuration = TransitionDuration(state);
             }
-            label = stateLabel ?? CodexSessionMonitor.StateLabel(value);
-            count = sessionCount;
             InvalidateVisual();
         }
 
@@ -179,7 +173,7 @@ public sealed class HaloVisual : FrameworkElement
             if (steadyDone != value)
             {
                 double now = clock.Elapsed.TotalSeconds;
-                CaptureTransitionStart(now);
+                CaptureTransitionStart();
                 steadyDone = value;
                 previousState = state;
                 stateChangedUtc = DateTime.UtcNow;
@@ -189,27 +183,12 @@ public sealed class HaloVisual : FrameworkElement
             }
         }
 
-        public void SetAnswerStreaming(bool value)
-        {
-            if (answerStreaming != value)
-            {
-                double now = clock.Elapsed.TotalSeconds;
-                CaptureTransitionStart(now);
-                answerStreaming = value;
-                previousState = VisualState();
-                stateChangedUtc = DateTime.UtcNow;
-                transitionStartSeconds = now;
-                transitionDuration = value ? 0.92 : 1.12;
-                InvalidateVisual();
-            }
-        }
-
-        private void CaptureTransitionStart(double now)
+        private void CaptureTransitionStart()
         {
             double localTime = Math.Max(0,
                 (DateTime.UtcNow - stateChangedUtc).TotalSeconds);
             transitionFromVisual = hasRenderedFrame ? renderedVisual :
-                TargetVisual(VisualState(), localTime);
+                TargetVisual(state, localTime);
             transitionFromColor = transitionFromVisual.Color;
         }
 
@@ -218,7 +197,7 @@ public sealed class HaloVisual : FrameworkElement
             if (errorPresentation != value)
             {
                 double now = clock.Elapsed.TotalSeconds;
-                CaptureTransitionStart(now);
+                CaptureTransitionStart();
                 errorPresentation = value;
                 previousState = state;
                 stateChangedUtc = DateTime.UtcNow;
@@ -249,7 +228,7 @@ public sealed class HaloVisual : FrameworkElement
             state = to;
             transitionFromColor = StateColor(from);
             transitionFromVisual = TargetVisual(from, absoluteTime);
-            transitionDuration = TransitionDuration(from, to);
+            transitionDuration = TransitionDuration(to);
             transitionStartSeconds = absoluteTime - transitionDuration *
                 Clamp(progress, 0, 1);
             testTime = absoluteTime;
@@ -288,8 +267,7 @@ public sealed class HaloVisual : FrameworkElement
             transitionFromVisual = TargetVisual(HaloState.Done, 0);
             transitionFromVisual.Powered = 0;
             transitionFromVisual.Breath = 0.34;
-            transitionDuration = TransitionDuration(HaloState.Done,
-                HaloState.Thinking);
+            transitionDuration = TransitionDuration(HaloState.Thinking);
             testTime = 4;
             transitionStartSeconds = testTime - transitionDuration *
                 Clamp(progress, 0, 1);
@@ -396,7 +374,7 @@ public sealed class HaloVisual : FrameworkElement
             double scale = Math.Min(width, height) / 112.0;
             dc.PushTransform(new ScaleTransform(scale, scale, center.X, center.Y));
 
-            HaloState visualState = VisualState();
+            HaloState visualState = state;
             MediaColor color = AnimatedColor(t);
             double displayEnergy = useTestTime
                 ? Lerp(TargetEnergy(previousState), TargetEnergy(visualState), transition)
@@ -410,29 +388,25 @@ public sealed class HaloVisual : FrameworkElement
             }
 
             DrawPureRing(dc, center, color, displayEnergy, displayOuterPhase,
-                displayInnerPhase, t, sinceState, transition);
+                displayInnerPhase, sinceState, transition);
             hasRenderedFrame = true;
             dc.Pop();
         }
 
         private void DrawPureRing(DrawingContext dc, MediaPoint center, MediaColor color,
-            double displayEnergy, double gapA, double gapB, double t, double sinceState,
+            double displayEnergy, double gapA, double gapB, double sinceState,
             double transition)
         {
-            HaloState visualState = VisualState();
+            HaloState visualState = state;
             double localStateTime = useTestTime && transitionStartSeconds < 0
                 ? sinceState : Math.Max(0, sinceState - transitionDuration);
             VisualSnapshot target = TargetVisual(visualState, localStateTime);
             target.Color = color;
             VisualSnapshot visual = TransitionVisual(transitionFromVisual, target,
                 transition);
-            double breath = visual.Breath;
-            double streamingFlash = answerStreaming
-                ? CompletionDoubleFlash(PositiveModulo(localStateTime, 1.8)) : 0;
             double completionFlash = state == HaloState.Done
                 && !steadyDone && transition >= 0.999
                     ? CompletionDoubleFlash(localStateTime) : 0;
-            completionFlash = Math.Max(completionFlash, streamingFlash);
             double intensity = Clamp(visual.Intensity + displayEnergy * 0.18 +
                 completionFlash * 0.5, 0, 1.32);
             double radius = 35.8 + completionFlash * 0.45;
@@ -623,7 +597,7 @@ public sealed class HaloVisual : FrameworkElement
             double targetOrbitVelocity = TargetGapVelocityA(state) *
                 GapVelocityEnvelopeA(state, now);
             outerVelocity = Damp(outerVelocity, targetOrbitVelocity, delta, 2.1);
-            energy = Damp(energy, TargetEnergy(VisualState()), delta, 4.2);
+            energy = Damp(energy, TargetEnergy(state), delta, 4.2);
             outerPhase += outerVelocity * delta;
 
             if (gapRepelling)
@@ -680,389 +654,6 @@ public sealed class HaloVisual : FrameworkElement
             }
         }
 
-        private void DrawAmbientAura(DrawingContext dc, MediaPoint center, MediaColor color,
-            double displayEnergy, double t, double sinceState, double transition)
-        {
-            double breath = StateBreath(state, t);
-            double transitionFlash = Math.Sin(Math.PI * transition);
-            double intensity = Clamp(displayEnergy * (0.72 + breath * 0.28) +
-                transitionFlash * 0.17, 0, 1.4);
-
-            RadialGradientBrush atmosphere = new RadialGradientBrush();
-            atmosphere.Center = new MediaPoint(0.5, 0.5);
-            atmosphere.GradientOrigin = new MediaPoint(0.5, 0.5);
-            atmosphere.RadiusX = atmosphere.RadiusY = 0.5;
-            atmosphere.GradientStops.Add(new GradientStop(
-                WithAlpha(color, Alpha(16 * intensity)), 0));
-            atmosphere.GradientStops.Add(new GradientStop(
-                WithAlpha(color, Alpha(10 * intensity)), 0.42));
-            atmosphere.GradientStops.Add(new GradientStop(WithAlpha(color, 0), 1));
-            dc.DrawEllipse(atmosphere, null, center, 55, 55);
-
-            MediaPen outerGlow = NewPen(WithAlpha(color, Alpha(12 * intensity)), 13);
-            MediaPen middleGlow = NewPen(WithAlpha(color, Alpha(20 * intensity)), 7);
-            DrawPrecisionSegments(dc, center, 40.2, 0, outerGlow, 1);
-            DrawPrecisionSegments(dc, center, 40.2, 0, middleGlow, 1);
-
-            if (state == HaloState.Done && sinceState < 1.8)
-            {
-                double progress = Clamp(sinceState / 1.8, 0, 1);
-                double eased = EaseOutQuint(progress);
-                double radius = 40.5 + eased * 18;
-                byte alpha = Alpha(82 * Math.Pow(1 - progress, 2.2));
-                dc.DrawEllipse(null, NewPen(WithAlpha(color, alpha),
-                    0.8 + (1 - progress) * 0.8), center, radius, radius);
-            }
-        }
-
-        private void DrawMechanicalBase(DrawingContext dc, MediaPoint center, MediaColor color,
-            double displayEnergy, double t)
-        {
-            dc.DrawEllipse(null, NewPen(MediaColor.FromArgb(50, 104, 128, 145), 0.55),
-                center, 45.4, 45.4);
-            dc.DrawEllipse(null, NewPen(MediaColor.FromArgb(35, 94, 118, 134), 0.55),
-                center, 35.5, 35.5);
-
-            for (int i = 0; i < 12; i++)
-            {
-                double angle = -90 + i * 30;
-                double length = i % 3 == 0 ? 2.2 : 1.15;
-                DrawArc(dc, center, 45.4, angle - length / 2, length,
-                    NewPen(MediaColor.FromArgb(i % 3 == 0 ? (byte)66 : (byte)36,
-                        132, 155, 170), 0.8));
-            }
-
-            RadialGradientBrush glass = new RadialGradientBrush();
-            glass.GradientOrigin = new MediaPoint(0.37, 0.31);
-            glass.Center = new MediaPoint(0.5, 0.5);
-            glass.RadiusX = glass.RadiusY = 0.58;
-            glass.GradientStops.Add(new GradientStop(MediaColor.FromArgb(232, 28, 36, 46), 0));
-            glass.GradientStops.Add(new GradientStop(MediaColor.FromArgb(247, 8, 13, 19), 0.68));
-            glass.GradientStops.Add(new GradientStop(MediaColor.FromArgb(252, 2, 5, 9), 1));
-            dc.DrawEllipse(glass, NewPen(MediaColor.FromArgb(92, 113, 139, 157), 0.65),
-                center, 28.2, 28.2);
-
-            RadialGradientBrush innerEmission = new RadialGradientBrush();
-            innerEmission.GradientOrigin = new MediaPoint(0.44, 0.4);
-            innerEmission.GradientStops.Add(new GradientStop(WithAlpha(color,
-                Alpha(24 * displayEnergy)), 0));
-            innerEmission.GradientStops.Add(new GradientStop(WithAlpha(color, 0), 1));
-            dc.DrawEllipse(innerEmission, null, center, 23.5, 23.5);
-
-            System.Windows.Media.LinearGradientBrush lens =
-                new System.Windows.Media.LinearGradientBrush(
-                MediaColor.FromArgb(42, 255, 255, 255),
-                MediaColor.FromArgb(0, 255, 255, 255), 22);
-            dc.DrawEllipse(lens, null, new MediaPoint(center.X - 7.2, center.Y - 8.4),
-                7.8, 2.35);
-
-            DrawArc(dc, center, 30.7, 202, 72,
-                NewPen(MediaColor.FromArgb(34, 161, 183, 197), 0.6));
-            DrawArc(dc, center, 30.7, 292, 34,
-                NewPen(WithAlpha(color, Alpha(42 * displayEnergy)), 0.65));
-        }
-
-        private void DrawPrimaryRing(DrawingContext dc, MediaPoint center, MediaColor color,
-            double displayEnergy, double t, double transition)
-        {
-            double breath = StateBreath(state, t);
-            double intensity = Clamp(0.35 + displayEnergy * 0.58 + breath * 0.12, 0, 1.2);
-            double microDrift = 0.65 * Math.Sin(t * 0.54) +
-                0.24 * Math.Sin(t * 1.31);
-
-            DrawPrecisionSegments(dc, center, 40.2, microDrift,
-                NewPen(MediaColor.FromArgb(118, 26, 35, 43), 3.6), 1);
-            DrawPrecisionSegments(dc, center, 40.2, microDrift,
-                NewPen(WithAlpha(color, Alpha(15 * intensity)), 9.5), 1);
-            DrawPrecisionSegments(dc, center, 40.2, microDrift,
-                NewPen(WithAlpha(color, Alpha(34 * intensity)), 4.8), 1);
-            DrawPrecisionSegments(dc, center, 40.2, microDrift,
-                NewPen(WithAlpha(color, Alpha(208 * intensity)), 2.05), 1);
-            DrawPrecisionSegments(dc, center, 39.85, microDrift,
-                NewPen(WithAlpha(MixColor(color, MediaColor.FromRgb(239, 251, 255), 0.42),
-                    Alpha(132 * intensity)), 0.62), 1);
-
-            if (transition < 0.999)
-            {
-                double wave = EaseInOutCubic(transition);
-                double angle = -92 + wave * 360;
-                DrawEnergyPacket(dc, center,
-                    MixColor(color, MediaColor.FromRgb(245, 253, 255), 0.72),
-                    angle, 40.2, 22, 0.75 + Math.Sin(Math.PI * transition) * 0.25);
-            }
-        }
-
-        private void DrawStateLayer(DrawingContext dc, MediaPoint center, HaloState layerState,
-            MediaColor color, double outer, double inner, double t, double sinceState,
-            double opacity)
-        {
-            opacity = Clamp(opacity, 0, 1);
-            if (opacity < 0.004)
-            {
-                return;
-            }
-
-            if (layerState == HaloState.Idle)
-            {
-                double angle = outer + 24 * SoftWave(t / 7.2);
-                DrawArc(dc, center, 40.2, angle, 30,
-                    NewPen(WithAlpha(color, Alpha(80 * opacity)), 1.15));
-                return;
-            }
-
-            if (layerState == HaloState.Thinking)
-            {
-                double thinkingPhase = outer + 13 * Math.Sin(t * 1.07) +
-                    4.5 * Math.Sin(t * 2.41);
-                DrawEnergyPacket(dc, center, color, thinkingPhase, 40.2, 25,
-                    opacity * (0.72 + 0.28 * SoftWave(t / 2.25)));
-                DrawEnergyPacket(dc, center, color, thinkingPhase + 156, 40.2, 12,
-                    opacity * 0.48);
-                DrawArc(dc, center, 33.3, inner + 14, 58,
-                    NewPen(WithAlpha(color, Alpha(72 * opacity)), 0.9));
-                for (int i = 0; i < 3; i++)
-                {
-                    double nodePulse = SoftWave(t / 1.65 + i * 0.21);
-                    double angle = inner * 0.46 + i * 120 + 9 * Math.Sin(t * 0.8 + i);
-                    MediaPoint point = PointOnCircle(center, 33.3, angle);
-                    double size = 0.85 + nodePulse * 0.7;
-                    dc.DrawEllipse(new SolidColorBrush(WithAlpha(color,
-                        Alpha((90 + nodePulse * 130) * opacity))), null,
-                        point, size, size);
-                }
-                return;
-            }
-
-            if (layerState == HaloState.Working)
-            {
-                double drive = 0.8 + 0.2 * SoftWave(t / 0.86);
-                DrawEnergyPacket(dc, center, color, outer + 10, 40.2, 39,
-                    opacity * drive);
-                DrawEnergyPacket(dc, center,
-                    MixColor(color, MediaColor.FromRgb(235, 252, 255), 0.55),
-                    outer + 184, 40.2, 17, opacity * 0.58);
-                for (int i = 0; i < 14; i++)
-                {
-                    double alpha = 28 + 82 * Math.Pow((i + 1) / 14.0, 1.8);
-                    DrawArc(dc, center, 33.3, inner + i * 25.7,
-                        i % 2 == 0 ? 10 : 6,
-                        NewPen(WithAlpha(color, Alpha(alpha * opacity)), 0.85));
-                }
-                DrawEnergyPacket(dc, center, color, inner + 72, 33.3, 20,
-                    opacity * 0.72);
-                return;
-            }
-
-            if (layerState == HaloState.Done)
-            {
-                double arrival = EaseOutBack(Clamp(sinceState / 0.92, 0, 1));
-                dc.DrawEllipse(null, NewPen(WithAlpha(color,
-                    Alpha(105 * opacity * arrival)), 0.8), center,
-                    34.8 + arrival * 1.2, 34.8 + arrival * 1.2);
-                DrawArc(dc, center, 33.3, -90, 360 * Clamp(arrival, 0, 1),
-                    NewPen(WithAlpha(color, Alpha(88 * opacity)), 0.85));
-                return;
-            }
-
-            if (layerState == HaloState.Attention)
-            {
-                double pulse = DoublePulse(t, 1.34);
-                double radius = 34.8 + EaseOutCubic(pulse) * 3.5;
-                DrawArc(dc, center, radius, -68, 52,
-                    NewPen(WithAlpha(color, Alpha((58 + pulse * 152) * opacity)), 1.25));
-                DrawArc(dc, center, radius, 112, 52,
-                    NewPen(WithAlpha(color, Alpha((58 + pulse * 152) * opacity)), 1.25));
-                if (pulse > 0.08)
-                {
-                    dc.DrawEllipse(null, NewPen(WithAlpha(color,
-                        Alpha(42 * pulse * opacity)), 0.7), center,
-                        31 + pulse * 10, 31 + pulse * 10);
-                }
-                return;
-            }
-
-            double tremor = 1.6 * Math.Sin(t * 13.1) + 0.8 * Math.Sin(t * 23.7);
-            double errorPulse = 0.45 + 0.55 * DoublePulse(t, 1.08);
-            double[] starts = new double[] { -82, -8, 61, 135, 218 };
-            double[] lengths = new double[] { 42, 27, 49, 34, 31 };
-            for (int i = 0; i < starts.Length; i++)
-            {
-                DrawArc(dc, center, 35.3 + (i % 2) * 0.7,
-                    starts[i] + tremor * (i % 2 == 0 ? 1 : -1), lengths[i],
-                    NewPen(WithAlpha(color,
-                        Alpha((72 + errorPulse * 112) * opacity)), 1.2));
-            }
-        }
-
-        private void DrawCenter(DrawingContext dc, MediaPoint center, MediaColor color,
-            double displayEnergy, double t, double sinceState, double transition)
-        {
-            double coreBreath = 0.65 + 0.35 * StateBreath(state, t);
-            dc.DrawEllipse(null, NewPen(WithAlpha(color,
-                Alpha(42 * displayEnergy)), 0.65), center, 9.2, 9.2);
-
-            DrawGlyph(dc, center, previousState, transitionFromColor, t, sinceState,
-                1 - transition);
-            DrawGlyph(dc, center, state, color, t, sinceState, transition);
-
-            double genericCoreOpacity =
-                (UsesGenericCore(previousState) ? 1 - transition : 0) +
-                (UsesGenericCore(state) ? transition : 0);
-            if (genericCoreOpacity > 0.01)
-            {
-                double radius = 2.0 + 1.05 * coreBreath;
-                RadialGradientBrush core = new RadialGradientBrush();
-                core.GradientStops.Add(new GradientStop(
-                    MediaColor.FromArgb(Alpha(235 * genericCoreOpacity),
-                        245, 253, 255), 0));
-                core.GradientStops.Add(new GradientStop(
-                    WithAlpha(color, Alpha(205 * displayEnergy *
-                        genericCoreOpacity)), 0.4));
-                core.GradientStops.Add(new GradientStop(WithAlpha(color, 0), 1));
-                dc.DrawEllipse(core, null, center, radius + 1.6, radius + 1.6);
-            }
-        }
-
-        private static void DrawGlyph(DrawingContext dc, MediaPoint center, HaloState glyphState,
-            MediaColor color, double t, double sinceState, double opacity)
-        {
-            opacity = Clamp(opacity, 0, 1);
-            if (opacity < 0.01)
-            {
-                return;
-            }
-
-            if (glyphState == HaloState.Done)
-            {
-                double reveal = EaseOutBack(Clamp(sinceState / 0.72, 0, 1));
-                double scale = 0.72 + 0.28 * reveal;
-                dc.PushTransform(new ScaleTransform(scale, scale, center.X, center.Y));
-                StreamGeometry check = new StreamGeometry();
-                using (StreamGeometryContext context = check.Open())
-                {
-                    context.BeginFigure(new MediaPoint(center.X - 7.3, center.Y + 0.2),
-                        false, false);
-                    context.LineTo(new MediaPoint(center.X - 2.1, center.Y + 5.3),
-                        true, false);
-                    context.LineTo(new MediaPoint(center.X + 8.2, center.Y - 7.2),
-                        true, false);
-                }
-                MediaPen checkPen = NewPen(WithAlpha(color,
-                    Alpha(228 * opacity * reveal)), 2.15);
-                checkPen.LineJoin = PenLineJoin.Round;
-                dc.DrawGeometry(null, checkPen, check);
-                dc.Pop();
-                return;
-            }
-
-            if (glyphState == HaloState.Attention || glyphState == HaloState.Error)
-            {
-                double pulse = glyphState == HaloState.Error
-                    ? DoublePulse(t, 1.08) : DoublePulse(t, 1.34);
-                SolidColorBrush brush = new SolidColorBrush(WithAlpha(color,
-                    Alpha((172 + 60 * pulse) * opacity)));
-                dc.DrawRoundedRectangle(brush, null,
-                    new Rect(center.X - 1.05, center.Y - 7.2, 2.1, 9.3), 1.1, 1.1);
-                dc.DrawEllipse(brush, null, new MediaPoint(center.X, center.Y + 6),
-                    1.25, 1.25);
-                return;
-            }
-
-            if (glyphState == HaloState.Working)
-            {
-                StreamGeometry diamond = new StreamGeometry();
-                using (StreamGeometryContext context = diamond.Open())
-                {
-                    context.BeginFigure(new MediaPoint(center.X, center.Y - 5.1), false, true);
-                    context.LineTo(new MediaPoint(center.X + 5.1, center.Y), true, false);
-                    context.LineTo(new MediaPoint(center.X, center.Y + 5.1), true, false);
-                    context.LineTo(new MediaPoint(center.X - 5.1, center.Y), true, false);
-                }
-                dc.DrawGeometry(null, NewPen(WithAlpha(color,
-                    Alpha(82 * opacity)), 0.75), diamond);
-            }
-            else if (glyphState == HaloState.Thinking)
-            {
-                DrawArc(dc, center, 6.2, 28 + 8 * Math.Sin(t * 0.9), 224,
-                    NewPen(WithAlpha(color, Alpha(78 * opacity)), 0.75));
-            }
-            else
-            {
-                dc.DrawEllipse(null, NewPen(WithAlpha(color,
-                    Alpha(52 * opacity)), 0.65), center, 6.4, 6.4);
-            }
-        }
-
-        private static void DrawPrecisionSegments(DrawingContext dc, MediaPoint center,
-            double radius, double rotation, MediaPen pen, double opacity)
-        {
-            double[] starts = new double[] { -88, 32, 152 };
-            for (int i = 0; i < starts.Length; i++)
-            {
-                DrawArc(dc, center, radius, starts[i] + rotation, 112, pen);
-            }
-        }
-
-        private static void DrawEnergyPacket(DrawingContext dc, MediaPoint center,
-            MediaColor color, double angle, double radius, double tailLength, double opacity)
-        {
-            opacity = Clamp(opacity, 0, 1);
-            const int pieces = 12;
-            for (int i = 0; i < pieces; i++)
-            {
-                double normalized = (i + 1) / (double)pieces;
-                double eased = Math.Pow(normalized, 2.35);
-                double segmentAngle = angle - tailLength + normalized * tailLength;
-                double alpha = 8 + eased * 184;
-                DrawArc(dc, center, radius, segmentAngle, Math.Max(1.1,
-                    tailLength / pieces * 0.72),
-                    NewPen(WithAlpha(color, Alpha(alpha * opacity)),
-                        1.15 + eased * 1.35));
-            }
-            MediaPoint point = PointOnCircle(center, radius, angle);
-            dc.DrawEllipse(new SolidColorBrush(WithAlpha(
-                MixColor(color, MediaColor.FromRgb(247, 253, 255), 0.72),
-                Alpha(232 * opacity))), null, point, 1.55, 1.55);
-        }
-
-        private void DrawCount(DrawingContext dc, MediaPoint center, int value)
-        {
-            MediaPoint badge = new MediaPoint(center.X + 35, center.Y - 31);
-            dc.DrawEllipse(new SolidColorBrush(MediaColor.FromArgb(246, 10, 14, 19)),
-                NewPen(MediaColor.FromArgb(160, 121, 147, 166), 0.8), badge, 9, 9);
-            string text = value > 9 ? "9+" : value.ToString(CultureInfo.InvariantCulture);
-            FormattedText formatted = new FormattedText(text, CultureInfo.InvariantCulture,
-                FlowDirection.LeftToRight, new Typeface("Segoe UI Semibold"), 9.5,
-                System.Windows.Media.Brushes.White, 1.0);
-            dc.DrawText(formatted, new MediaPoint(badge.X - formatted.Width / 2,
-                badge.Y - formatted.Height / 2 - 0.5));
-        }
-
-        private static void DrawArc(DrawingContext dc, MediaPoint center, double radius,
-            double startDegrees, double sweepDegrees, MediaPen pen)
-        {
-            if (sweepDegrees <= 0.001)
-            {
-                return;
-            }
-            if (sweepDegrees >= 359.999)
-            {
-                dc.DrawEllipse(null, pen, center, radius, radius);
-                return;
-            }
-            MediaPoint start = PointOnCircle(center, radius, startDegrees);
-            MediaPoint end = PointOnCircle(center, radius, startDegrees + sweepDegrees);
-            StreamGeometry geometry = new StreamGeometry();
-            using (StreamGeometryContext context = geometry.Open())
-            {
-                context.BeginFigure(start, false, false);
-                context.ArcTo(end, new System.Windows.Size(radius, radius), 0,
-                    sweepDegrees > 180, SweepDirection.Clockwise, true, false);
-            }
-            geometry.Freeze();
-            dc.DrawGeometry(null, pen, geometry);
-        }
-
         private static MediaPoint PointOnCircle(MediaPoint center, double radius, double degrees)
         {
             double radians = degrees * Math.PI / 180.0;
@@ -1082,13 +673,7 @@ public sealed class HaloVisual : FrameworkElement
         {
             double progress = TransitionProgress(time);
             double colorProgress = SmootherStep(Clamp((progress - 0.18) / 0.56, 0, 1));
-            return MixColor(transitionFromColor, StateColor(VisualState()), colorProgress);
-        }
-
-        private static double TransitionScalar(double from, double to, double progress)
-        {
-            double blend = SmootherStep(Clamp((progress - 0.42) / 0.58, 0, 1));
-            return Lerp(from, to, blend);
+            return MixColor(transitionFromColor, StateColor(state), colorProgress);
         }
 
         private static double TransitionLight(double from, double to, double progress)
@@ -1118,12 +703,7 @@ public sealed class HaloVisual : FrameworkElement
                 transitionDuration, 0, 1));
         }
 
-        private HaloState VisualState()
-        {
-            return answerStreaming ? HaloState.Done : state;
-        }
-
-        private static double TransitionDuration(HaloState from, HaloState to)
+        private static double TransitionDuration(HaloState to)
         {
             return GeneratedHaloSpec.TransitionDuration(to);
         }
@@ -1331,12 +911,6 @@ public sealed class HaloVisual : FrameworkElement
                 parameters.BrightShare);
         }
 
-        private static bool UsesGenericCore(HaloState value)
-        {
-            return value == HaloState.Idle || value == HaloState.Thinking ||
-                value == HaloState.Working;
-        }
-
         public static MediaColor StateColor(HaloState state)
         {
             SharedStateParameters parameters = GeneratedHaloSpec.State(state);
@@ -1367,55 +941,6 @@ public sealed class HaloVisual : FrameworkElement
             double lightness;
             RgbToHsl(color, out hue, out saturation, out lightness);
             return HslToRgb(hue, Clamp(saturation * multiplier, 0, 1), lightness);
-        }
-
-        private static MediaColor MixEmissionColor(MediaColor from, MediaColor to,
-            double amount)
-        {
-            amount = Clamp(amount, 0, 1);
-            double fromHue;
-            double fromSaturation;
-            double fromLightness;
-            double toHue;
-            double toSaturation;
-            double toLightness;
-            RgbToHsl(from, out fromHue, out fromSaturation, out fromLightness);
-            RgbToHsl(to, out toHue, out toSaturation, out toLightness);
-
-            if (fromSaturation < 0.04)
-            {
-                fromHue = toHue;
-            }
-            if (toSaturation < 0.04)
-            {
-                toHue = fromHue;
-            }
-            double hueDelta = toHue - fromHue;
-            if (hueDelta > 180)
-            {
-                hueDelta -= 360;
-            }
-            else if (hueDelta < -180)
-            {
-                hueDelta += 360;
-            }
-
-            if (Math.Abs(hueDelta) > 100)
-            {
-                MediaColor bridge = MediaColor.FromRgb(218, 241, 248);
-                if (amount < 0.5)
-                {
-                    return MixColor(from, bridge,
-                        EaseInOutCubic(amount * 2));
-                }
-                return MixColor(bridge, to,
-                    EaseInOutCubic((amount - 0.5) * 2));
-            }
-
-            double hue = PositiveModulo(fromHue + hueDelta * amount, 360);
-            double saturation = Lerp(fromSaturation, toSaturation, amount);
-            double lightness = Lerp(fromLightness, toLightness, amount);
-            return HslToRgb(hue, saturation, lightness);
         }
 
         private static void RgbToHsl(MediaColor color, out double hue,
@@ -1500,14 +1025,6 @@ public sealed class HaloVisual : FrameworkElement
                 1.055 * Math.Pow(value, 1.0 / 2.4) - 0.055;
         }
 
-        private static double DoublePulse(double time, double period)
-        {
-            double cycle = PositiveModulo(time, period) / period;
-            double first = Math.Exp(-Math.Pow((cycle - 0.13) / 0.055, 2));
-            double second = Math.Exp(-Math.Pow((cycle - 0.31) / 0.07, 2));
-            return Clamp(first + second * 0.82, 0, 1);
-        }
-
         private static double AttentionPulse(double time)
         {
             double cycle = PositiveModulo(time, GeneratedHaloSpec.AttentionPeriod) /
@@ -1540,16 +1057,6 @@ public sealed class HaloVisual : FrameworkElement
             return Clamp(first + second, 0, 1);
         }
 
-        private static double ThinkingBreath(double time)
-        {
-            return LivingBreath(time, 5.5, 1.0, 0.26, 0.70);
-        }
-
-        private static double LongBrightBreath(double time, double period)
-        {
-            return LivingBreath(time, period, 1, 0.16, 0.74);
-        }
-
         private static double LivingBreath(double time, double period,
             double maximum, double minimum, double brightShare)
         {
@@ -1580,12 +1087,6 @@ public sealed class HaloVisual : FrameworkElement
             return SmootherStep(triangle);
         }
 
-        private static double LampBreath(double time, double period)
-        {
-            double phase = PositiveModulo(time, period) / period;
-            return 0.5 - 0.5 * Math.Cos(phase * Math.PI * 2);
-        }
-
         private static double PositiveModulo(double value, double modulus)
         {
             double result = value % modulus;
@@ -1601,34 +1102,6 @@ public sealed class HaloVisual : FrameworkElement
         {
             value = Clamp(value, 0, 1);
             return value * value * value * (value * (value * 6 - 15) + 10);
-        }
-
-        private static double EaseInOutCubic(double value)
-        {
-            value = Clamp(value, 0, 1);
-            return value < 0.5 ? 4 * value * value * value :
-                1 - Math.Pow(-2 * value + 2, 3) / 2;
-        }
-
-        private static double EaseOutCubic(double value)
-        {
-            value = Clamp(value, 0, 1);
-            return 1 - Math.Pow(1 - value, 3);
-        }
-
-        private static double EaseOutQuint(double value)
-        {
-            value = Clamp(value, 0, 1);
-            return 1 - Math.Pow(1 - value, 5);
-        }
-
-        private static double EaseOutBack(double value)
-        {
-            value = Clamp(value, 0, 1);
-            const double c1 = 1.70158;
-            const double c3 = c1 + 1;
-            return 1 + c3 * Math.Pow(value - 1, 3) +
-                c1 * Math.Pow(value - 1, 2);
         }
 
         private static double Lerp(double from, double to, double amount)

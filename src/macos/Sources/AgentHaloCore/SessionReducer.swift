@@ -1,5 +1,27 @@
 import Foundation
 
+enum CodexAttentionHeuristics {
+    static func isAttentionToolName(_ name: String) -> Bool {
+        if name.caseInsensitiveCompare("request_user_input") == .orderedSame {
+            return true
+        }
+        let lower = name.lowercased()
+        return lower.contains("approval")
+            || lower.contains("permission")
+            || lower.contains("request_user")
+            || lower.contains("needs_input")
+    }
+
+    static func isEscalatedArgumentsFragment(_ value: String) -> Bool {
+        guard !value.isEmpty,
+              value.range(of: "require_escalated", options: .caseInsensitive) != nil else {
+            return false
+        }
+        return value.range(of: "sandbox_permissions", options: .caseInsensitive) != nil
+            || value.range(of: "justification", options: .caseInsensitive) != nil
+    }
+}
+
 public struct SessionReducer: Sendable {
     private static let workingVisibilityExtension: TimeInterval = 1.8
     public private(set) var snapshot: SessionSnapshot
@@ -336,14 +358,7 @@ public struct SessionReducer: Sendable {
     }
 
     private static func isAttentionFunctionCall(name: String, payload: [String: Any]) -> Bool {
-        if name.caseInsensitiveCompare("request_user_input") == .orderedSame {
-            return true
-        }
-        let lower = name.lowercased()
-        if lower.contains("approval")
-            || lower.contains("permission")
-            || lower.contains("request_user")
-            || lower.contains("needs_input") {
+        if CodexAttentionHeuristics.isAttentionToolName(name) {
             return true
         }
         if requiresApproval(name: name, payload: payload) {
@@ -360,16 +375,7 @@ public struct SessionReducer: Sendable {
         } else {
             raw = payload.string("arguments")
         }
-        return isEscalatedArgumentsFragment(raw)
-    }
-
-    private static func isEscalatedArgumentsFragment(_ value: String) -> Bool {
-        guard !value.isEmpty,
-              value.range(of: "require_escalated", options: .caseInsensitive) != nil else {
-            return false
-        }
-        return value.range(of: "sandbox_permissions", options: .caseInsensitive) != nil
-            || value.range(of: "justification", options: .caseInsensitive) != nil
+        return CodexAttentionHeuristics.isEscalatedArgumentsFragment(raw)
     }
 
     private static func requiresApproval(name: String, payload: [String: Any]) -> Bool {

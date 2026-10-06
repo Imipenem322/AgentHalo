@@ -60,22 +60,6 @@ internal sealed class AgentMonitorCoordinator : IDisposable
             }
         }
 
-        public long Generation
-        {
-            get
-            {
-                lock (gate)
-                {
-                    return generation;
-                }
-            }
-        }
-
-        internal long FocusGeneration
-        {
-            get { return Generation; }
-        }
-
         public bool IsStarted
         {
             get
@@ -500,15 +484,6 @@ internal sealed class AgentMonitorCoordinator : IDisposable
                 return existing;
             }
             IAgentProvider created = catalog.Create(kind);
-            if (created == null || created.Kind != kind)
-            {
-                if (created != null)
-                {
-                    created.Dispose();
-                }
-                throw new InvalidOperationException(
-                    "The agent provider factory returned an invalid provider.");
-            }
             providers.Add(kind, created);
             return created;
         }

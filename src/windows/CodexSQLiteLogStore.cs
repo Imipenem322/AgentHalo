@@ -94,7 +94,8 @@ internal sealed class CodexSQLiteLogStore : IDisposable
             {
                 return true;
             }
-            int opened = sqlite3_open_v2(databasePath, out connection,
+            byte[] filename = Encoding.UTF8.GetBytes(databasePath + "\0");
+            int opened = sqlite3_open_v2(filename, out connection,
                 SqliteOpenReadOnly, null);
             if (opened != 0 || connection == IntPtr.Zero)
             {
@@ -144,9 +145,8 @@ internal sealed class CodexSQLiteLogStore : IDisposable
             }
         }
 
-        [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl,
-            CharSet = CharSet.Ansi)]
-        private static extern int sqlite3_open_v2(string filename,
+        [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
+        private static extern int sqlite3_open_v2(byte[] filename,
             out IntPtr database, int flags, string vfs);
 
         [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl,

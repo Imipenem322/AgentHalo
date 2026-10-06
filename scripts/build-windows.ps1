@@ -128,10 +128,6 @@ try {
     New-Item -ItemType Directory -Force -Path $packageDocs | Out-Null
     Copy-Item -LiteralPath (Join-Path $root "docs\DEEPSEEK_HARNESS_INTEGRATION.zh-CN.md") `
         -Destination $packageDocs -Force
-    Remove-Item -LiteralPath "$output\locales" -Recurse -Force -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath (Join-Path $output "AgentHalo.pdb") -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath (Join-Path $output "sqlite3.exe") -ErrorAction SilentlyContinue
-
     $hash = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash
     $hashLine = "$hash  AgentHalo.exe"
     Set-Content -LiteralPath (Join-Path $output "SHA256.txt") -Value $hashLine `

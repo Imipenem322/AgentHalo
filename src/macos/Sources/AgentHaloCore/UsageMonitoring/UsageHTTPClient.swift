@@ -89,14 +89,9 @@ public final class URLSessionUsageHTTPClient: UsageHTTPClient {
             urlRequest.setValue(value, forHTTPHeaderField: key)
         }
 
-        let (data, response): (Data, HTTPURLResponse)
+        let result: (Data, URLResponse)
         do {
-            let result = try await session.data(for: urlRequest)
-            data = result.0
-            guard let httpResponse = result.1 as? HTTPURLResponse else {
-                throw UsageProviderFailure.invalidResponse
-            }
-            response = httpResponse
+            result = try await session.data(for: urlRequest)
         } catch {
             // Only safe-surface info: method, fixed host. No status/elapsed on
             // a transport failure; never log headers, body or the error text.
@@ -104,6 +99,10 @@ public final class URLSessionUsageHTTPClient: UsageHTTPClient {
             throw UsageProviderFailure.network
         }
 
+        guard let response = result.1 as? HTTPURLResponse else {
+            throw UsageProviderFailure.invalidResponse
+        }
+        let data = result.0
         let elapsed = Date().timeIntervalSince(start)
         // Only safe-surface info: method, fixed official host, status, elapsed.
         NSLog("[UsageHTTP] %@ %@ status=%d elapsed=%.3fs", request.method, fixedHost, response.statusCode, elapsed)

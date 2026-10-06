@@ -212,6 +212,13 @@ internal sealed class DeepSeekHarnessReadResult
 
 internal sealed class DeepSeekHarnessSnapshotReader
     {
+        private enum DocumentValidationResult
+        {
+            Valid,
+            Unsupported,
+            Broken
+        }
+
         internal const int MaxSnapshotBytes = 2 * 1024 * 1024;
         internal const int MaxTasksPerInstance = 512;
         internal const int MaxInstances = 32;
@@ -305,16 +312,12 @@ internal sealed class DeepSeekHarnessSnapshotReader
                     result.Broken = true;
                     continue;
                 }
-                if (!ValidateDocument(file, document))
+                DocumentValidationResult validationResult =
+                    ValidateDocument(file, document);
+                if (validationResult != DocumentValidationResult.Valid)
                 {
-                    if (document == null || document.schemaVersion != 1 ||
-                        !IsSupportedBridgeVersion(document.bridgeVersion) ||
-                        !String.Equals(document.dshVersion,
-                            "0.2.0-rc.2", StringComparison.Ordinal) ||
-                        !String.Equals(document.profile, "desktop",
-                            StringComparison.Ordinal) ||
-                        !String.Equals(document.desktopAppId,
-                            "com.deepseek.dsh", StringComparison.Ordinal))
+                    if (validationResult ==
+                        DocumentValidationResult.Unsupported)
                     {
                         result.Unsupported = true;
                     }
@@ -578,19 +581,27 @@ internal sealed class DeepSeekHarnessSnapshotReader
             }
         }
 
-        private bool ValidateDocument(string file,
+        private DocumentValidationResult ValidateDocument(string file,
             DeepSeekHarnessSnapshotDocument document)
         {
-            if (document == null || document.schemaVersion != 1 ||
+            if (document == null)
+            {
+                return DocumentValidationResult.Broken;
+            }
+            if (document.schemaVersion != 1 ||
                 !IsSupportedBridgeVersion(document.bridgeVersion) ||
                 !String.Equals(document.dshVersion, "0.2.0-rc.2",
                     StringComparison.Ordinal) ||
                 !String.Equals(document.profile, "desktop",
                     StringComparison.Ordinal) ||
-                !String.Equals(document.hostRuntime, "electron-node",
-                    StringComparison.Ordinal) ||
                 !String.Equals(document.desktopAppId,
-                    "com.deepseek.dsh", StringComparison.Ordinal) ||
+                    "com.deepseek.dsh", StringComparison.Ordinal))
+            {
+                return DocumentValidationResult.Unsupported;
+            }
+
+            if (!String.Equals(document.hostRuntime, "electron-node",
+                    StringComparison.Ordinal) ||
                 String.IsNullOrWhiteSpace(document.instanceId) ||
                 document.hostPid <= 0 || document.hostParentPid <= 0 ||
                 document.hostPid == document.hostParentPid ||
@@ -603,27 +614,28 @@ internal sealed class DeepSeekHarnessSnapshotReader
                 document.tasks == null ||
                 document.tasks.Length > MaxTasksPerInstance)
             {
-                return false;
+                return DocumentValidationResult.Broken;
             }
 
             string expectedFile = document.instanceId + ".json";
             if (!String.Equals(Path.GetFileName(file), expectedFile,
                     StringComparison.OrdinalIgnoreCase))
             {
-                return false;
+                return DocumentValidationResult.Broken;
             }
 
             DateTime ignored;
             if (!TryUtc(document.hostStartUtc, out ignored) ||
                 !TryUtc(document.publishedAtUtc, out ignored))
             {
-                return false;
+                return DocumentValidationResult.Broken;
             }
 
-            string expectedProfile = ExpectedProfileDirectory();
+            string expectedProfile =
+                AgentHaloPaths.DeepSeekHarnessDesktopProfileDirectory();
             if (!SameFullPath(document.hostProfileDir, expectedProfile))
             {
-                return false;
+                return DocumentValidationResult.Broken;
             }
 
             HashSet<string> roots = new HashSet<string>(
@@ -634,10 +646,10 @@ internal sealed class DeepSeekHarnessSnapshotReader
                     String.IsNullOrWhiteSpace(task.rootSessionId) ||
                     !roots.Add(task.rootSessionId))
                 {
-                    return false;
+                    return DocumentValidationResult.Broken;
                 }
             }
-            return true;
+            return DocumentValidationResult.Valid;
         }
 
         private static bool IsSupportedBridgeVersion(string value)
@@ -728,17 +740,6 @@ internal sealed class DeepSeekHarnessSnapshotReader
             return TryUtc(first.hostStartUtc, out firstStart) &&
                 TryUtc(second.hostStartUtc, out secondStart) &&
                 Math.Abs((firstStart - secondStart).TotalSeconds) <= 2;
-        }
-
-        private static string ExpectedProfileDirectory()
-        {
-            string home = Environment.GetEnvironmentVariable("DSH_HOME");
-            if (String.IsNullOrWhiteSpace(home))
-            {
-                home = Path.Combine(Environment.GetFolderPath(
-                    Environment.SpecialFolder.UserProfile), ".dsh");
-            }
-            return Path.GetFullPath(Path.Combine(home, "profiles", "desktop"));
         }
 
         private static bool SameFullPath(string first, string second)
@@ -847,9 +848,8 @@ internal static class DeepSeekHarnessSnapshotReducer
             {
                 unknown = true;
             }
-            bool connectedUnknown = source != null && hasLiveInstance &&
-                (!confirmedReady || unknown || selected == null &&
-                    !IsReady(source));
+            bool connectedUnknown = hasLiveInstance &&
+                (!confirmedReady || unknown);
 
             HaloState aggregateState;
             string aggregateLabel;
@@ -952,7 +952,6 @@ internal static class DeepSeekHarnessSnapshotReducer
                     Label = aggregateLabel,
                     Detail = L10n.Instance[statusKey],
                     Sessions = sessions,
-                    AnswerStreaming = false,
                     FocusedAgent = AgentKind.DeepSeekHarness,
                     Presence = presence,
                     TurnPhase = phase,
@@ -1319,10 +1318,7 @@ internal static class DeepSeekHarnessSnapshotReducer
 
         private static bool IsRootFailureTerminal(DeepSeekHarnessTask task)
         {
-            if (task.terminal == null ||
-                !String.IsNullOrWhiteSpace(task.turnId) &&
-                !String.Equals(task.turnId, task.terminal.turnId,
-                    StringComparison.Ordinal))
+            if (task.terminal == null)
             {
                 return false;
             }

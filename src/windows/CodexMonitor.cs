@@ -33,7 +33,6 @@ public sealed class SessionTracker
         private long offset;
         private string pending;
         private DateTime observedWriteUtc;
-        private long observedLength;
         private readonly HashSet<string> activeToolIds;
         private int anonymousActiveTools;
         private bool currentTurnIsPlanMode;
@@ -70,9 +69,7 @@ public sealed class SessionTracker
             Snapshot.EvidenceSource = AgentEvidenceSource.SessionJsonl;
             ReadMetadata();
             ReadInitialTail();
-            FileInfo initialInfo = new FileInfo(path);
-            observedWriteUtc = initialInfo.LastWriteTimeUtc;
-            observedLength = initialInfo.Length;
+            observedWriteUtc = File.GetLastWriteTimeUtc(path);
         }
 
         private static string ExtractThreadId(string path)
@@ -128,7 +125,7 @@ public sealed class SessionTracker
                         }
                     }
                     ReadAvailable(stream);
-                    offset = stream.Length;
+                    offset = stream.Position;
                 }
             }
             catch (Exception ex)
@@ -146,7 +143,7 @@ public sealed class SessionTracker
             {
                 FileInfo info = new FileInfo(FilePath);
                 DateTime writeUtc = info.LastWriteTimeUtc;
-                if (writeUtc <= observedWriteUtc && info.Length <= observedLength)
+                if (writeUtc <= observedWriteUtc && info.Length == offset)
                 {
                     return previousState != Snapshot.State ||
                         previousAction != Snapshot.Action;
@@ -163,11 +160,10 @@ public sealed class SessionTracker
                     {
                         stream.Seek(offset, SeekOrigin.Begin);
                         ReadAvailable(stream);
-                        offset = stream.Length;
+                        offset = stream.Position;
                     }
                 }
                 observedWriteUtc = writeUtc;
-                observedLength = info.Length;
             }
             catch (IOException)
             {
@@ -611,7 +607,8 @@ public sealed class SessionTracker
             if (lower.Contains("exec") || lower.Contains("command") ||
                 lower.Contains("shell"))
                 return AgentAttentionReason.CommandConfirmation;
-            if (IsEscalatedCommandArguments(GetString(payload, "arguments")))
+            if (CodexRealtimeActivityReader.IsEscalatedArgumentsFragment(
+                GetString(payload, "arguments")))
                 return AgentAttentionReason.CommandConfirmation;
             return AgentAttentionReason.UserInput;
         }
@@ -751,29 +748,9 @@ public sealed class SessionTracker
         private static bool IsAttentionFunctionCall(string name,
             Dictionary<string, object> payload)
         {
-            if (String.Equals(name, "request_user_input",
-                StringComparison.OrdinalIgnoreCase))
-            {
-                return true;
-            }
-            string lowerName = (name ?? String.Empty).ToLowerInvariant();
-            if (lowerName.IndexOf("approval", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                lowerName.IndexOf("permission", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                lowerName.IndexOf("request_user", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                lowerName.IndexOf("needs_input", StringComparison.OrdinalIgnoreCase) >= 0)
-            {
-                return true;
-            }
-            string arguments = GetString(payload, "arguments");
-            return IsEscalatedCommandArguments(arguments);
-        }
-
-        private static bool IsEscalatedCommandArguments(string arguments)
-        {
-            return !String.IsNullOrEmpty(arguments) &&
-                arguments.IndexOf("require_escalated", StringComparison.OrdinalIgnoreCase) >= 0 &&
-                (arguments.IndexOf("sandbox_permissions", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                 arguments.IndexOf("justification", StringComparison.OrdinalIgnoreCase) >= 0);
+            return CodexRealtimeActivityReader.IsAttentionToolName(name) ||
+                CodexRealtimeActivityReader.IsEscalatedArgumentsFragment(
+                    GetString(payload, "arguments"));
         }
 
         private static DateTime ParseTimestamp(string value)
@@ -844,7 +821,6 @@ public sealed class CodexSessionMonitor : IDisposable
         private DateTime nextRealtimePollUtc;
         private HaloState realtimeState;
         private string realtimeAction;
-        private bool realtimeAnswerStreaming;
         private bool hasRealtimeActivity;
         private bool started;
         private int pollInProgress;
@@ -933,19 +909,16 @@ public sealed class CodexSessionMonitor : IDisposable
                         nextRealtimePollUtc = DateTime.UtcNow.AddMilliseconds(300);
                         HaloState activeState;
                         string activeAction;
-                        bool answerStreaming;
                         bool active = realtimeActivity.TryReadActive(out activeState,
-                            out activeAction, out answerStreaming);
+                            out activeAction);
                         if (active != hasRealtimeActivity ||
                             activeState != realtimeState ||
-                            answerStreaming != realtimeAnswerStreaming ||
                             !String.Equals(activeAction, realtimeAction,
                                 StringComparison.Ordinal))
                         {
                             hasRealtimeActivity = active;
                             realtimeState = activeState;
                             realtimeAction = activeAction ?? String.Empty;
-                            realtimeAnswerStreaming = answerStreaming;
                             changed = true;
                         }
                     }
@@ -1143,7 +1116,6 @@ public sealed class CodexSessionMonitor : IDisposable
                     result.Label = StateLabel(realtimeState);
                     result.Detail = (current == null ? "Codex" : current.ProjectName) +
                         " · " + realtimeAction;
-                    result.AnswerStreaming = realtimeAnswerStreaming;
                     result.Presence = AgentPresenceState.Active;
                     result.TurnPhase = PhaseForState(realtimeState);
                     result.Activity = ActivityForRealtime(realtimeAction);
@@ -1373,16 +1345,8 @@ public sealed class CodexRealtimeActivityReader
 
         public bool TryReadActive(out HaloState state, out string action)
         {
-            bool answerStreaming;
-            return TryReadActive(out state, out action, out answerStreaming);
-        }
-
-        public bool TryReadActive(out HaloState state, out string action,
-            out bool answerStreaming)
-        {
             state = HaloState.Working;
             action = String.Empty;
-            answerStreaming = false;
             long cutoff = DateTimeOffset.UtcNow.AddMinutes(-5).ToUnixTimeSeconds();
             string query = "select feedback_log_body from logs where ts >= " +
                 cutoff.ToString(CultureInfo.InvariantCulture) +
@@ -1390,22 +1354,14 @@ public sealed class CodexRealtimeActivityReader
                 "feedback_log_body like 'SSE event: {\"type\":\"response.%' " +
                 "order by id desc limit 96;";
             List<string> rows = CodexSQLiteLogStore.Shared.QueryText(query);
-            return FindActive(rows, out state, out action, out answerStreaming);
+            return FindActive(rows, out state, out action);
         }
 
         public bool FindActive(IEnumerable<string> newestFirst, out HaloState state,
             out string action)
         {
-            bool answerStreaming;
-            return FindActive(newestFirst, out state, out action, out answerStreaming);
-        }
-
-        public bool FindActive(IEnumerable<string> newestFirst, out HaloState state,
-            out string action, out bool answerStreaming)
-        {
             state = HaloState.Working;
             action = String.Empty;
-            answerStreaming = false;
             bool hasArgumentActivity = false;
             bool hasAttentionArgumentActivity = false;
             HashSet<string> completed = new HashSet<string>(
@@ -1433,7 +1389,6 @@ public sealed class CodexRealtimeActivityReader
                     {
                         action = "Generating response";
                     }
-                    answerStreaming = false;
                     return true;
                 }
                 if (eventType == "response.completed" ||
@@ -1466,8 +1421,7 @@ public sealed class CodexRealtimeActivityReader
                 {
                     continue;
                 }
-                if (String.Equals(name, "request_user_input",
-                    StringComparison.OrdinalIgnoreCase) || IsAttentionToolName(name))
+                if (IsAttentionToolName(name))
                 {
                     state = HaloState.Attention;
                     action = "Needs you";
@@ -1556,7 +1510,7 @@ public sealed class CodexRealtimeActivityReader
             }
         }
 
-        private static bool IsAttentionToolName(string name)
+        internal static bool IsAttentionToolName(string name)
         {
             string lower = (name ?? String.Empty).ToLowerInvariant();
             return lower == "request_user_input" ||
@@ -1566,7 +1520,7 @@ public sealed class CodexRealtimeActivityReader
                 lower.IndexOf("needs_input", StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
-        private static bool IsEscalatedArgumentsFragment(string value)
+        internal static bool IsEscalatedArgumentsFragment(string value)
         {
             return !String.IsNullOrEmpty(value) &&
                 value.IndexOf("require_escalated", StringComparison.OrdinalIgnoreCase) >= 0 &&
@@ -1676,6 +1630,7 @@ public static class CodexFailureReader
                 if (tab <= 0) continue;
                 long seconds;
                 if (!long.TryParse(line.Substring(0, tab), out seconds)) continue;
+                if (seconds < -62135596800L || seconds > 253402300799L) continue;
                 string matched = GeneratedHaloSpec.ClassifyFailure(
                     line.Substring(tab + 1));
                 if (matched == null) continue;

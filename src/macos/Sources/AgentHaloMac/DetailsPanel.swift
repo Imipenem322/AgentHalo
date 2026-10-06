@@ -1,23 +1,6 @@
 import AppKit
 import AgentHaloCore
 
-enum DetailsPanelContentRole: Equatable {
-    case agentIndicator
-    case statusTitle
-    case statusDetail
-    case usageBody
-    case sessionBody
-    case unknown
-}
-
-enum DetailsPanelSessionBodyRole: Equatable {
-    case separator
-    case sessionTitle
-    case model
-    case tokens
-    case unknown
-}
-
 @MainActor
 class DetailsPanel: NSPanel {
     private static let panelWidth: CGFloat = 278
@@ -419,144 +402,9 @@ class DetailsPanel: NSPanel {
         .codex
     }
 
-    var titleTextForTesting: String {
-        titleField.stringValue
-    }
-
     var detailTextForTesting: String {
         detailField.stringValue
     }
-
-    var contextPillHiddenForTesting: Bool {
-        contextPill.isHidden
-    }
-
-    var contextValueForTesting: String {
-        contextValue.stringValue
-    }
-
-    var contextPillWidthForTesting: CGFloat {
-        contextPill.frame.width
-    }
-
-    var contextValueWidthForTesting: CGFloat {
-        contextValue.bounds.width
-    }
-
-    var contextValueIntrinsicWidthForTesting: CGFloat {
-        contextValue.intrinsicContentSize.width
-    }
-
-    var contextValueExpansionFrameForTesting: CGRect {
-        contextValue.cell?.expansionFrame(withFrame: contextValue.bounds, in: contextValue) ?? .zero
-    }
-
-    var contentOrderForTesting: [DetailsPanelContentRole] {
-        stack.arrangedSubviews.map { view in
-            if view === topRow { return .agentIndicator }
-            if view === titleField { return .statusTitle }
-            if view === detailField { return .statusDetail }
-            if view === quotaGroup { return .usageBody }
-            if view === metadataGroup { return .sessionBody }
-            return .unknown
-        }
-    }
-
-    var usageGroupHiddenForTesting: Bool {
-        quotaGroup.isHidden
-    }
-
-    var sessionGroupHiddenForTesting: Bool {
-        metadataGroup.isHidden
-    }
-
-    var sessionBodyOrderForTesting: [DetailsPanelSessionBodyRole] {
-        metadataGroup.arrangedSubviews.map { view in
-            if view === sessionTitleRow { return .sessionTitle }
-            if view === modelRow { return .model }
-            if view === tokenRow { return .tokens }
-            if view is SeparatorView { return .separator }
-            return .unknown
-        }
-    }
-
-    var sessionRowHeightsForTesting: [CGFloat] {
-        contentView?.layoutSubtreeIfNeeded()
-        return [sessionTitleRow, modelRow, tokenRow].map(\.frame.height)
-    }
-
-    var primaryQuotaTitleForTesting: String {
-        primaryQuota.titleForTesting
-    }
-
-    var secondaryQuotaTitleForTesting: String {
-        secondaryQuota.titleForTesting
-    }
-
-    var primaryQuotaValueForTesting: String {
-        primaryQuota.valueForTesting
-    }
-
-    var secondaryQuotaValueForTesting: String {
-        secondaryQuota.valueForTesting
-    }
-
-    var primaryQuotaResetHiddenForTesting: Bool {
-        primaryQuota.resetHiddenForTesting
-    }
-
-    var secondaryQuotaResetHiddenForTesting: Bool {
-        secondaryQuota.resetHiddenForTesting
-    }
-
-    var primaryQuotaMeterFillForTesting: Double {
-        primaryQuota.meterFillForTesting
-    }
-
-    var secondaryQuotaMeterFillForTesting: Double {
-        secondaryQuota.meterFillForTesting
-    }
-
-    var sessionTitleValueForTesting: String {
-        sessionTitleRow.value
-    }
-
-    var modelValueForTesting: String {
-        modelRow.value
-    }
-
-    var tokenValueForTesting: String {
-        tokenRow.value
-    }
-
-    var sessionTitleToolTipForTesting: String? {
-        sessionTitleRow.valueToolTip
-    }
-
-    var modelToolTipForTesting: String? {
-        modelRow.valueToolTip
-    }
-
-    var frameWidthForTesting: CGFloat {
-        frame.width
-    }
-
-    var frameHeightForTesting: CGFloat {
-        frame.height
-    }
-
-    var stackFittingHeightForTesting: CGFloat {
-        stack.fittingSize.height
-    }
-
-    var metadataTopInsetForTesting: CGFloat {
-        metadataGroup.edgeInsets.top
-    }
-
-    var backingScaleForTesting: CGFloat {
-        effectiveBackingScale
-    }
-
 }
 
 @MainActor
@@ -741,22 +589,6 @@ private final class QuotaRowView: NSView {
 
     func setTitle(_ title: String) {
         nameField.stringValue = title
-    }
-
-    var titleForTesting: String {
-        nameField.stringValue
-    }
-
-    var valueForTesting: String {
-        valueField.stringValue
-    }
-
-    var resetHiddenForTesting: Bool {
-        resetField.isHidden
-    }
-
-    var meterFillForTesting: Double {
-        meter.value
     }
 
     private func setup() {

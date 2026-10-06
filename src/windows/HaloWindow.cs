@@ -608,18 +608,15 @@ public sealed class HaloWindow : Window
                 aggregate.Detail = "Preview mode";
                 aggregate.Presence = AgentPresenceState.Active;
             }
-            int count = aggregate.Sessions == null ? 0 : aggregate.Sessions.Count;
             bool showGreenStandby = ShouldShowGreenStandby(aggregate,
                 demoState.HasValue);
             visual.SetSteadyDone(showGreenStandby);
             visual.SetErrorPresentation(demoErrorPresentation ?? errorPresentation);
-            visual.SetState(aggregate.State, aggregate.Label, count);
-            visual.SetAnswerStreaming(false);
-            AggregateSnapshot codexDisplayAggregate = aggregate;
-            displayAggregate = codexDisplayAggregate;
-            providerSnapshot.Aggregate = codexDisplayAggregate;
-            tray.Text = ("Agent Halo · " + codexDisplayAggregate.Label).Substring(0,
-                Math.Min(63, ("Agent Halo · " + codexDisplayAggregate.Label).Length));
+            visual.SetState(aggregate.State);
+            displayAggregate = aggregate;
+            providerSnapshot.Aggregate = aggregate;
+            tray.Text = ("Agent Halo · " + aggregate.Label).Substring(0,
+                Math.Min(63, ("Agent Halo · " + aggregate.Label).Length));
             details.SetEnabledAgentDescriptors(EnabledAgentDescriptors());
             details.SetAgentSwitchingEnabled(!settings.Paused);
             if (!settings.Paused && deepSeekSetup != null &&
@@ -725,16 +722,16 @@ public sealed class HaloWindow : Window
             }
             else
             {
-                ShowOrRefreshDetails(true);
+                ShowOrRefreshDetails();
             }
         }
 
         private void ShowHoverDetails()
         {
-            ShowOrRefreshDetails(false);
+            ShowOrRefreshDetails();
         }
 
-        private void ShowOrRefreshDetails(bool activate)
+        private void ShowOrRefreshDetails()
         {
             AggregateSnapshot detailsAggregate = displayAggregate ?? aggregate;
             if (detailsAggregate == null)

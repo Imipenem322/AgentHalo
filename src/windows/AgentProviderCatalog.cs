@@ -167,25 +167,6 @@ internal sealed class AgentProviderCatalog
                 });
         }
 
-        public bool TryResolve(string key,
-            out AgentProviderDescriptor descriptor)
-        {
-            descriptor = Find(key);
-            return descriptor != null;
-        }
-
-        public bool TryParse(string key, out AgentKind kind)
-        {
-            AgentProviderDescriptor descriptor = Find(key);
-            if (descriptor == null)
-            {
-                kind = DefaultKind;
-                return false;
-            }
-            kind = descriptor.Kind;
-            return true;
-        }
-
         public AgentKind ParseOrDefault(string key)
         {
             AgentProviderDescriptor descriptor = Find(key);

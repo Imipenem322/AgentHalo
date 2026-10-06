@@ -61,7 +61,6 @@ internal sealed class DeepSeekHarnessAgentProvider : IAgentProvider
 
         public void Start()
         {
-            bool startedNow = false;
             lock (pollGate)
             {
                 ThrowIfDisposed();
@@ -71,12 +70,8 @@ internal sealed class DeepSeekHarnessAgentProvider : IAgentProvider
                 }
                 active = true;
                 timer = new Timer(OnTimer, null, 0, 1000);
-                startedNow = true;
             }
-            if (startedNow)
-            {
-                Poll(false);
-            }
+            Poll(false);
         }
 
         public void Stop()

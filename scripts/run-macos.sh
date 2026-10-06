@@ -112,6 +112,17 @@ case "$mode" in
     verify_tmp="$verify_temp_dir/tmp"
     verify_diagnostics="$verify_temp_dir/diagnostics"
     mkdir -p "$verify_home" "$verify_codex_home" "$verify_tmp" "$verify_diagnostics"
+    verify_env=(
+      "HOME=$verify_home"
+      "CFFIXED_USER_HOME=$verify_home"
+      "CODEX_HOME=$verify_codex_home"
+      "XDG_CONFIG_HOME=$verify_temp_dir/xdg"
+      "TMPDIR=$verify_tmp"
+      "USER=agenthalo-verify"
+      "LOGNAME=agenthalo-verify"
+      "PATH=/usr/bin:/bin:/usr/sbin:/sbin"
+      "LANG=en_US.UTF-8"
+    )
 
     real_home="${HOME:-}"
     sandbox_profile="(version 1)
@@ -125,16 +136,7 @@ case "$mode" in
 (deny file-read* (subpath \"$real_home/Library/Application Support/AgentHalo\"))
 (deny file-write* (subpath \"$real_home\"))"
 
-    /usr/bin/env -i \
-      HOME="$verify_home" \
-      CFFIXED_USER_HOME="$verify_home" \
-      CODEX_HOME="$verify_codex_home" \
-      XDG_CONFIG_HOME="$verify_temp_dir/xdg" \
-      TMPDIR="$verify_tmp" \
-      USER="agenthalo-verify" \
-      LOGNAME="agenthalo-verify" \
-      PATH="/usr/bin:/bin:/usr/sbin:/sbin" \
-      LANG="en_US.UTF-8" \
+    /usr/bin/env -i "${verify_env[@]}" \
       /usr/bin/sandbox-exec -p "$sandbox_profile" "$app_binary" --packaged-verification \
       >"$verify_diagnostics/app.log" 2>&1 &
     verify_pid=$!
@@ -187,16 +189,7 @@ case "$mode" in
     fi
 
     diagnostics_binary="$root_dir/src/macos/.build/debug/AgentHaloDiagnostics"
-    /usr/bin/env -i \
-      HOME="$verify_home" \
-      CFFIXED_USER_HOME="$verify_home" \
-      CODEX_HOME="$verify_codex_home" \
-      XDG_CONFIG_HOME="$verify_temp_dir/xdg" \
-      TMPDIR="$verify_tmp" \
-      USER="agenthalo-verify" \
-      LOGNAME="agenthalo-verify" \
-      PATH="/usr/bin:/bin:/usr/sbin:/sbin" \
-      LANG="en_US.UTF-8" \
+    /usr/bin/env -i "${verify_env[@]}" \
       /usr/bin/sandbox-exec -p "$sandbox_profile" \
       "$diagnostics_binary" --snapshot "$verify_diagnostics/snapshot.txt"
     test -s "$verify_diagnostics/snapshot.txt"

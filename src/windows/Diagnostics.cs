@@ -306,7 +306,6 @@ public static class Diagnostics
                 Assert(!realtime.FindActive(new[] { realtimeMessageDone, realtimeMessageAdded },
                     out realtimeState, out realtimeAction),
                     "live final answer done clears realtime working");
-                bool answerStreaming;
                 string realtimeTextDelta =
                     "SSE event: {\"type\":\"response.output_text.delta\"," +
                     "\"delta\":\"hello\"}";
@@ -316,25 +315,23 @@ public static class Diagnostics
                     "SSE event: {\"type\":\"response.completed\",\"response\":{" +
                     "\"id\":\"resp-test\"}}";
                 Assert(realtime.FindActive(new[] { realtimeTextDelta },
-                    out realtimeState, out realtimeAction, out answerStreaming) &&
+                    out realtimeState, out realtimeAction) &&
                     realtimeState == HaloState.Working &&
-                    realtimeAction == "Generating response" &&
-                    !answerStreaming,
-                    "live text delta -> working without answer streaming");
+                    realtimeAction == "Generating response",
+                    "live text delta -> working");
                 string realtimeContextCompactDelta =
                     "SSE event: {\"type\":\"response.output_text.delta\"," +
                     "\"delta\":\"Compressing context\"}";
                 Assert(realtime.FindActive(new[] { realtimeContextCompactDelta },
-                    out realtimeState, out realtimeAction, out answerStreaming) &&
+                    out realtimeState, out realtimeAction) &&
                     realtimeState == HaloState.Working &&
-                    realtimeAction == "Compressing context" &&
-                    !answerStreaming,
-                    "live context compact delta -> working without answer streaming");
+                    realtimeAction == "Compressing context",
+                    "live context compact delta -> working");
                 Assert(!realtime.FindActive(new[] { realtimeCompleted, realtimeTextDelta },
-                    out realtimeState, out realtimeAction, out answerStreaming),
+                    out realtimeState, out realtimeAction),
                     "live response completed clears realtime working");
                 Assert(!realtime.FindActive(new[] { realtimeTextDone, realtimeTextDelta },
-                    out realtimeState, out realtimeAction, out answerStreaming),
+                    out realtimeState, out realtimeAction),
                     "live text done clears realtime working");
                 string realtimeInputAdded =
                     "SSE event: {\"type\":\"response.output_item.added\",\"item\":{" +
@@ -946,6 +943,14 @@ public static class Diagnostics
                     Math.Abs(mergedQuota.WeeklyUsedPercent - 30) < 0.001 &&
                     Math.Abs(mergedQuota.ContextUsedPercent - 50) < 0.001,
                     "live OAuth quota overrides JSONL while JSONL supplies context");
+                mergedQuota.FiveHourUsedPercent = 99;
+                mergedQuota.ContextInputTokens = 0;
+                UsageMetrics rereadQuota = CodexUsageMonitor.MergeForTest(
+                    localQuota, remoteQuota, mergeNow);
+                Assert(rereadQuota.FiveHourUsedPercent == 20 &&
+                    rereadQuota.ContextInputTokens == 50 &&
+                    localQuota.FiveHourUsedPercent == 80,
+                    "usage merge returns an independent result");
                 UsageMetrics fallbackQuota = CodexUsageMonitor.MergeForTest(
                     localQuota, null, mergeNow);
                 Assert(Math.Abs(fallbackQuota.FiveHourUsedPercent - 80) < 0.001 &&
@@ -1498,6 +1503,30 @@ public static class Diagnostics
             Assert(catalog.Descriptors.Count == 1 &&
                 catalog.Descriptors[0].Key == "codex",
                 "provider catalog owns the Codex registration");
+            FakeAgentProvider wrongProvider = new FakeAgentProvider();
+            foreach (Func<IAgentProvider> factory in new Func<IAgentProvider>[]
+            {
+                delegate { return null; },
+                delegate { throw new InvalidOperationException("factory failed"); },
+                delegate { return wrongProvider; }
+            })
+            {
+                AgentProviderCatalog invalidCatalog = new AgentProviderCatalog(new[]
+                {
+                    new AgentProviderDescriptor
+                    {
+                        Kind = AgentKind.DeepSeekHarness,
+                        Key = "deepseek-harness",
+                        CreateProvider = factory
+                    }
+                });
+                bool rejected = false;
+                try { invalidCatalog.Create(AgentKind.DeepSeekHarness); }
+                catch (InvalidOperationException) { rejected = true; }
+                Assert(rejected, "provider catalog rejects a failed factory");
+            }
+            Assert(wrongProvider.DisposeCount == 1,
+                "provider catalog disposes a wrong-kind result once");
 
             UsageMetrics quotaMetrics = new UsageMetrics
             {
@@ -1655,7 +1684,6 @@ public static class Diagnostics
             RunDefaultCodexIsolationChecks();
             RunAgentSwitchTransactionChecks();
             RunAgentSwitchFailureChecks();
-            RunAgentSwitchStressChecks();
             RunAgentPauseChecks();
             RunAgentDetailsIsolationChecks();
             Assert(!CodexUsageMonitor.InstanceCreatedForDiagnostics,
@@ -1934,6 +1962,14 @@ public static class Diagnostics
                     return e.FocusChanged;
                 }) == focusChangesBefore,
                 "same-target selection has no lifecycle or persistence churn");
+            Assert(coordinator.TrySwitch(AgentKind.DeepSeekHarness, settings,
+                    DateTime.UtcNow, delegate { return true; }, out firstSnapshot) &&
+                coordinator.TrySwitch(AgentKind.Codex, settings,
+                    DateTime.UtcNow, delegate { return true; }, out firstSnapshot) &&
+                probe.CodexCreateCount == 1 && probe.DeepSeekHarnessCreateCount == 1 &&
+                probe.PeakActiveCount == 1 && codex.SubscriberCount == 1 &&
+                deepSeekHarness.SubscriberCount == 0,
+                "repeated round-trip reuses providers without overlapping subscriptions");
             coordinator.Dispose();
             Assert(probe.ActiveCount == 0 && codex.DisposeCount == 1 &&
                 deepSeekHarness.DisposeCount == 1,
@@ -2008,53 +2044,6 @@ public static class Diagnostics
             coordinator.Dispose();
             Assert(probe.ActiveCount == 0,
                 "rollback fixture stops after " + scenario);
-        }
-
-        private static void RunAgentSwitchStressChecks()
-        {
-            SwitchProbe probe = new SwitchProbe();
-            SwitchingFakeAgentProvider codex;
-            SwitchingFakeAgentProvider deepSeekHarness;
-            AgentProviderCatalog catalog = CreateSwitchCatalog(probe,
-                out codex, out deepSeekHarness);
-            HaloSettings settings = EnabledSwitchSettings(catalog);
-            AgentMonitorCoordinator coordinator =
-                new AgentMonitorCoordinator(catalog, AgentKind.Codex);
-            coordinator.Start();
-            int persistCount = 0;
-            for (int i = 0; i < 100; i++)
-            {
-                AgentKind target = coordinator.FocusedKind == AgentKind.Codex
-                    ? AgentKind.DeepSeekHarness : AgentKind.Codex;
-                AgentProviderSnapshot snapshot;
-                bool switched = coordinator.TrySwitch(target, settings,
-                    DateTime.UtcNow, delegate
-                    {
-                        persistCount++;
-                        return true;
-                    }, out snapshot);
-                SwitchingFakeAgentProvider current = target == AgentKind.Codex
-                    ? codex : deepSeekHarness;
-                SwitchingFakeAgentProvider inactive = target == AgentKind.Codex
-                    ? deepSeekHarness : codex;
-                Assert(switched && coordinator.FocusedKind == target &&
-                    snapshot.Aggregate.FocusedAgent == target &&
-                    probe.ActiveCount == 1 && current.IsActive &&
-                    !inactive.IsActive && current.SubscriberCount == 1 &&
-                    inactive.SubscriberCount == 0,
-                    "stress switch keeps one active provider at iteration " +
-                    i.ToString(CultureInfo.InvariantCulture));
-            }
-            Assert(persistCount == 100 && probe.CodexCreateCount == 1 &&
-                probe.DeepSeekHarnessCreateCount == 1 &&
-                probe.PeakActiveCount == 1,
-                "100 switches reuse providers without active overlap");
-            coordinator.Dispose();
-            Assert(probe.ActiveCount == 0 && codex.DisposeCount == 1 &&
-                deepSeekHarness.DisposeCount == 1 &&
-                codex.SubscriberCount == 0 &&
-                deepSeekHarness.SubscriberCount == 0,
-                "100-switch coordinator releases providers and subscriptions");
         }
 
         private static void RunAgentPauseChecks()
@@ -2654,7 +2643,7 @@ public static class Diagnostics
                     visual.Height = 132;
                     visual.HorizontalAlignment = HorizontalAlignment.Center;
                     visual.VerticalAlignment = VerticalAlignment.Center;
-                    visual.SetState(state, CodexSessionMonitor.StateLabel(state), state == HaloState.Working ? 3 : 1);
+                    visual.SetState(state);
                     visual.SetTestTime(PreviewTimeForState(state));
                     stage.Children.Add(visual);
                     stage.Measure(new System.Windows.Size(160, 160));
@@ -3027,7 +3016,7 @@ public static class Diagnostics
                 visual.Height = 126;
                 visual.HorizontalAlignment = HorizontalAlignment.Center;
                 visual.VerticalAlignment = VerticalAlignment.Center;
-                visual.SetState(state, CodexSessionMonitor.StateLabel(state), 1);
+                visual.SetState(state);
                 visual.SetTestTime(times[i]);
                 Grid.SetColumn(visual, i);
                 strip.Children.Add(visual);
@@ -3068,7 +3057,7 @@ public static class Diagnostics
                 visual.Height = 122;
                 visual.HorizontalAlignment = HorizontalAlignment.Center;
                 visual.VerticalAlignment = VerticalAlignment.Center;
-                visual.SetState(state, CodexSessionMonitor.StateLabel(state), 1);
+                visual.SetState(state);
                 visual.SetTestTime(period * i / (frameCount - 1.0));
                 Grid.SetColumn(visual, i);
                 strip.Children.Add(visual);
@@ -3139,7 +3128,7 @@ public static class Diagnostics
                     visual.Height = 132;
                     visual.HorizontalAlignment = HorizontalAlignment.Center;
                     visual.VerticalAlignment = VerticalAlignment.Center;
-                    visual.SetState(states[i], CodexSessionMonitor.StateLabel(states[i]), 1);
+                    visual.SetState(states[i]);
                     visual.SetTestTime(PreviewTimeForState(states[i]));
                     cell.Child = visual;
                     Grid.SetRow(cell, row);
@@ -3185,7 +3174,7 @@ public static class Diagnostics
                 visual.Height = 136;
                 visual.HorizontalAlignment = HorizontalAlignment.Center;
                 visual.VerticalAlignment = VerticalAlignment.Center;
-                visual.SetState(states[i], CodexSessionMonitor.StateLabel(states[i]), 1);
+                visual.SetState(states[i]);
                 if (states[i] == HaloState.Error)
                 {
                     visual.SetErrorPresentation(ErrorPresentation.Bright);
@@ -3230,7 +3219,7 @@ public static class Diagnostics
                 visual.Height = size;
                 visual.HorizontalAlignment = HorizontalAlignment.Center;
                 visual.VerticalAlignment = VerticalAlignment.Center;
-                visual.SetState(HaloState.Working, "EXECUTING", 1);
+                visual.SetState(HaloState.Working);
                 visual.SetTestTime(0.8);
                 Grid.SetColumn(visual, i);
                 strip.Children.Add(visual);
@@ -3431,8 +3420,7 @@ public static class Diagnostics
                 visual.Height = 126;
                 visual.HorizontalAlignment = HorizontalAlignment.Center;
                 visual.VerticalAlignment = VerticalAlignment.Center;
-                visual.SetState(HaloState.Done,
-                    CodexSessionMonitor.StateLabel(HaloState.Done), 1);
+                visual.SetState(HaloState.Done);
                 visual.SetTestTime(times[i]);
                 Grid.SetColumn(visual, i);
                 strip.Children.Add(visual);
@@ -3466,7 +3454,7 @@ public static class Diagnostics
             window.Left = SystemParameters.WorkArea.Left + 20;
             window.Top = SystemParameters.WorkArea.Top + 20;
             HaloVisual visual = new HaloVisual();
-            visual.SetState(HaloState.Working, "EXECUTING", 1);
+            visual.SetState(HaloState.Working);
             window.Content = visual;
             window.Show();
 

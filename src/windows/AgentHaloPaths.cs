@@ -5,6 +5,29 @@ namespace CodexHalo
 {
 internal static class AgentHaloPaths
     {
+        public static string DeepSeekHarnessDesktopProfileDirectory()
+        {
+            string root = Environment.GetEnvironmentVariable("DSH_HOME");
+            if (String.IsNullOrWhiteSpace(root))
+            {
+                root = Path.Combine(Environment.GetFolderPath(
+                    Environment.SpecialFolder.UserProfile), ".dsh");
+            }
+            else
+            {
+                root = root.Trim();
+                if (root == "~" || root.StartsWith("~/") ||
+                    root.StartsWith("~\\"))
+                {
+                    root = Path.Combine(Environment.GetFolderPath(
+                        Environment.SpecialFolder.UserProfile),
+                        root.Length == 1 ? String.Empty : root.Substring(2));
+                }
+            }
+            return Path.GetFullPath(Path.Combine(root, "profiles",
+                "desktop"));
+        }
+
         public static bool IsUnderDirectory(string path, string directory)
         {
             if (String.IsNullOrWhiteSpace(path) ||
