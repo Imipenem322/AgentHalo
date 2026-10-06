@@ -692,7 +692,7 @@ func testMonitorHandlesPendingLinesAndTruncation() throws {
 
     try append(Data(unicodeBytes.dropFirst(unicodeByteOffset + 1)) + Data([0x0A]))
     _ = monitor.refresh(now: now.addingTimeInterval(3))
-    expect(monitor.snapshots().first?.state == .idle, "completed UTF-8 event should parse after the remaining bytes arrive")
+    expect(monitor.snapshots().first?.state == .done, "completed UTF-8 event should parse after the remaining bytes arrive")
     expect(monitor.refresh(now: now.addingTimeInterval(3.5)), false, "completed UTF-8 event should not be processed again")
 
     let nextEvent = Data(#"{"timestamp":"2026-06-13T02:00:04Z","type":"event_msg","payload":{"type":"task_started"}}"#.utf8)
