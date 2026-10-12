@@ -158,9 +158,6 @@ public sealed class DetailsWindow : Window
         private readonly TextBlock firstSegmentText;
         private readonly TextBlock secondSegmentText;
         private readonly Grid splitAgentSelector;
-        private readonly Button dropdownAgentButton;
-        private readonly TextBlock dropdownAgentText;
-        private readonly ContextMenu agentMenu;
         private readonly StackPanel quotaGroup;
         private readonly StackPanel infoGroup;
         private readonly Grid dataLayer;
@@ -190,6 +187,13 @@ public sealed class DetailsWindow : Window
             new List<AgentProviderDescriptor>();
         private AgentProviderDescriptor firstSegmentAgent;
         private AgentProviderDescriptor secondSegmentAgent;
+        private bool selectorNeedsRefresh = true;
+        private bool textNeedsRefresh;
+        private bool syncingContent;
+        private static readonly MediaBrush SelectedAgentBrush =
+            FrozenBrush(MediaColor.FromRgb(34, 84, 113));
+        private static readonly MediaBrush OtherAgentBrush =
+            FrozenBrush(MediaColor.FromRgb(78, 94, 103));
 
         internal event Action<AgentKind> AgentFocusRequested;
 
@@ -287,7 +291,6 @@ public sealed class DetailsWindow : Window
                     MediaColor.FromArgb(82, 231, 239, 244)),
                 ClipToBounds = true
             };
-            Grid selectorContent = new Grid();
             splitAgentSelector = new Grid();
             splitAgentSelector.ColumnDefinitions.Add(new ColumnDefinition());
             splitAgentSelector.ColumnDefinitions.Add(new ColumnDefinition());
@@ -336,42 +339,7 @@ public sealed class DetailsWindow : Window
             KeyboardNavigation.SetTabNavigation(splitAgentSelector,
                 KeyboardNavigationMode.Cycle);
 
-            StackPanel dropdownContent = new StackPanel
-            {
-                Orientation = Orientation.Horizontal,
-                HorizontalAlignment = HorizontalAlignment.Center,
-                VerticalAlignment = VerticalAlignment.Center
-            };
-            dropdownAgentText = NewText(String.Empty, 10.5,
-                MediaColor.FromRgb(34, 84, 113), FontWeights.SemiBold, true);
-            dropdownContent.Children.Add(dropdownAgentText);
-            System.Windows.Shapes.Path dropdownChevron =
-                new System.Windows.Shapes.Path
-                {
-                    Data = Geometry.Parse("M 0,0 L 4,4 L 8,0"),
-                    Width = 8,
-                    Height = 4,
-                    Stretch = Stretch.Fill,
-                    Stroke = new SolidColorBrush(
-                        MediaColor.FromRgb(64, 83, 94)),
-                    StrokeThickness = 1.25,
-                    Margin = new Thickness(5, 0, 0, 0),
-                    VerticalAlignment = VerticalAlignment.Center
-                };
-            dropdownContent.Children.Add(dropdownChevron);
-            dropdownAgentButton = CreateAgentSegmentButton(dropdownContent,
-                segmentStyle, L10n.Instance["menu.current_agent"]);
-            agentMenu = new ContextMenu();
-            dropdownAgentButton.ContextMenu = agentMenu;
-            dropdownAgentButton.Click += delegate
-            {
-                agentMenu.PlacementTarget = dropdownAgentButton;
-                agentMenu.Placement = PlacementMode.Bottom;
-                agentMenu.IsOpen = true;
-            };
-            selectorContent.Children.Add(splitAgentSelector);
-            selectorContent.Children.Add(dropdownAgentButton);
-            agentSelector.Child = selectorContent;
+            agentSelector.Child = splitAgentSelector;
             Grid.SetColumn(agentSelector, 1);
             statusRow.Children.Add(agentSelector);
 
@@ -462,7 +430,15 @@ public sealed class DetailsWindow : Window
             Content = shell;
             L10n.Instance.LanguageChanged += (s, ev) =>
             {
-                Dispatcher.Invoke(() => RefreshAllText());
+                Dispatcher.Invoke(new Action(delegate
+                {
+                    textNeedsRefresh = true;
+                    selectorNeedsRefresh = true;
+                    if (IsVisible)
+                    {
+                        RefreshAllText();
+                    }
+                }));
             };
         }
 
@@ -485,7 +461,11 @@ public sealed class DetailsWindow : Window
                 ?? new List<SessionSnapshot>();
             headline.Text = aggregate.Label;
             MediaColor accent = HaloVisual.StateColor(aggregate.State);
-            headline.Foreground = new SolidColorBrush(accent);
+            SolidColorBrush headlineBrush = headline.Foreground as SolidColorBrush;
+            if (headlineBrush == null || headlineBrush.Color != accent)
+            {
+                headline.Foreground = FrozenBrush(accent);
+            }
             AgentDetailsSnapshot details = snapshot.Details;
             if (IsDeepSeekTask(snapshot))
             {
@@ -509,22 +489,34 @@ public sealed class DetailsWindow : Window
 
         internal void SetAgentSwitchingEnabled(bool enabled)
         {
+            if (agentSwitchingEnabled == enabled)
+            {
+                return;
+            }
             agentSwitchingEnabled = enabled;
             ApplyAgentSwitchingState();
         }
 
-        internal void SetEnabledAgents(IEnumerable<AgentKind> enabledAgents)
+        internal void SyncContent(AgentProviderSnapshot snapshot,
+            IEnumerable<AgentProviderDescriptor> descriptors,
+            bool switchingEnabled)
         {
-            List<AgentProviderDescriptor> descriptors =
-                new List<AgentProviderDescriptor>();
-            if (enabledAgents != null)
+            syncingContent = true;
+            try
             {
-                foreach (AgentKind agent in enabledAgents)
+                agentSwitchingEnabled = switchingEnabled;
+                SetEnabledAgentDescriptors(descriptors);
+                if (textNeedsRefresh)
                 {
-                    descriptors.Add(CreateSelectorDescriptor(agent));
+                    RefreshAllText();
                 }
+                UpdateContent(snapshot);
             }
-            SetEnabledAgentDescriptors(descriptors);
+            finally
+            {
+                syncingContent = false;
+            }
+            ApplyAgentSwitchingState();
         }
 
         internal void SetEnabledAgentDescriptors(
@@ -548,10 +540,9 @@ public sealed class DetailsWindow : Window
             {
                 enabledAgentDescriptors.Clear();
                 enabledAgentDescriptors.AddRange(next);
-                RebuildAgentMenu();
+                selectorNeedsRefresh = true;
+                UpdateAgentSelector(selectedAgent);
             }
-            UpdateAgentSelector(selectedAgent);
-            ApplyAgentSwitchingState();
         }
 
         private static bool SameAgentOptions(
@@ -578,31 +569,6 @@ public sealed class DetailsWindow : Window
                 }
             }
             return true;
-        }
-
-        private static AgentProviderDescriptor CreateSelectorDescriptor(
-            AgentKind kind)
-        {
-            string key;
-            string name;
-            switch (kind)
-            {
-                case AgentKind.DeepSeekHarness:
-                    key = "agent.deepseek-harness";
-                    name = "DeepSeek Harness";
-                    break;
-                default:
-                    key = "agent.codex";
-                    name = "Codex";
-                    break;
-            }
-            return new AgentProviderDescriptor
-            {
-                Kind = kind,
-                Order = kind == AgentKind.DeepSeekHarness ? 1 : 0,
-                DisplayName = name,
-                DisplayNameKey = key
-            };
         }
 
         private static string FullAgentName(
@@ -870,27 +836,26 @@ public sealed class DetailsWindow : Window
 
         private void ApplyAgentSwitchingState()
         {
+            if (syncingContent)
+            {
+                return;
+            }
             bool canSwitch = enabledAgentDescriptors.Count > 1;
-            bool useDropdown = enabledAgentDescriptors.Count > 2;
             agentSelector.Visibility = canSwitch
-                ? Visibility.Visible : Visibility.Collapsed;
-            splitAgentSelector.Visibility = useDropdown
-                ? Visibility.Collapsed : Visibility.Visible;
-            dropdownAgentButton.Visibility = useDropdown
                 ? Visibility.Visible : Visibility.Collapsed;
             firstSegmentButton.IsEnabled = agentSwitchingEnabled &&
                 firstSegmentAgent != null;
             secondSegmentButton.IsEnabled = agentSwitchingEnabled &&
                 secondSegmentAgent != null;
-            dropdownAgentButton.IsEnabled = agentSwitchingEnabled;
-            foreach (object item in agentMenu.Items)
-            {
-                ((MenuItem)item).IsEnabled = agentSwitchingEnabled;
-            }
         }
 
         private void UpdateAgentSelector(AgentKind agent)
         {
+            if (selectedAgent == agent && !selectorNeedsRefresh)
+            {
+                return;
+            }
+            selectorNeedsRefresh = false;
             selectedAgent = agent;
             firstSegmentAgent = enabledAgentDescriptors.Count == 2
                 ? enabledAgentDescriptors[0] : null;
@@ -901,49 +866,7 @@ public sealed class DetailsWindow : Window
             SetSegmentOption(secondSegmentButton, secondSegmentText,
                 secondSegmentAgent, agent);
 
-            AgentProviderDescriptor selected = enabledAgentDescriptors
-                .FirstOrDefault(delegate(AgentProviderDescriptor descriptor)
-                {
-                    return descriptor.Kind == agent;
-                });
-            string name = selected == null
-                ? L10n.Instance[AgentDisplayNameKey(agent)]
-                : FullAgentName(selected);
-            dropdownAgentText.Text = selected == null
-                ? L10n.Instance[AgentShortNameKey(agent)]
-                : ShortAgentName(selected);
-            AutomationProperties.SetName(dropdownAgentButton, name);
-            ToolTipService.SetToolTip(dropdownAgentButton, name);
-
-            foreach (MenuItem item in agentMenu.Items)
-            {
-                item.IsChecked = (AgentKind)item.Tag == agent;
-            }
             ApplyAgentSwitchingState();
-        }
-
-        private void RebuildAgentMenu()
-        {
-            agentMenu.Items.Clear();
-            foreach (AgentProviderDescriptor descriptor in
-                enabledAgentDescriptors)
-            {
-                MenuItem item = new MenuItem
-                {
-                    Header = FullAgentName(descriptor),
-                    IsCheckable = true,
-                    IsChecked = descriptor.Kind == selectedAgent,
-                    Tag = descriptor.Kind,
-                    IsEnabled = agentSwitchingEnabled
-                };
-                AutomationProperties.SetName(item,
-                    FullAgentName(descriptor));
-                item.Click += delegate(object sender, RoutedEventArgs e)
-                {
-                    RequestAgentFocus((AgentKind)((MenuItem)sender).Tag);
-                };
-                agentMenu.Items.Add(item);
-            }
         }
 
         private static void SetSegmentOption(Button button, TextBlock text,
@@ -959,28 +882,18 @@ public sealed class DetailsWindow : Window
             }
             string name = FullAgentName(descriptor);
             text.Text = ShortAgentName(descriptor);
-            text.Foreground = new SolidColorBrush(
-                descriptor.Kind == selected
-                    ? MediaColor.FromRgb(34, 84, 113)
-                    : MediaColor.FromRgb(78, 94, 103));
+            text.Foreground = descriptor.Kind == selected
+                ? SelectedAgentBrush : OtherAgentBrush;
             button.Tag = descriptor.Kind == selected;
             ToolTipService.SetToolTip(button, name);
             AutomationProperties.SetName(button, name);
         }
 
-        private static string AgentDisplayNameKey(AgentKind agent)
+        private static MediaBrush FrozenBrush(MediaColor color)
         {
-            switch (agent)
-            {
-                case AgentKind.DeepSeekHarness:
-                    return "agent.deepseek-harness";
-                default: return "agent.codex";
-            }
-        }
-
-        private static string AgentShortNameKey(AgentKind agent)
-        {
-            return AgentDisplayNameKey(agent) + ".short";
+            SolidColorBrush brush = new SolidColorBrush(color);
+            brush.Freeze();
+            return brush;
         }
 
         private static Button CreateAgentSegmentButton(UIElement content,
@@ -1309,7 +1222,7 @@ public sealed class DetailsWindow : Window
 
         private void RefreshAllText()
         {
-            RebuildAgentMenu();
+            textNeedsRefresh = false;
             UpdateAgentSelector(selectedAgent);
             fiveHourLabel.Text = L10n.Instance["quota.5h"];
             longTermLabel.Text = L10n.Instance[longTermLabelKey];
@@ -1320,7 +1233,7 @@ public sealed class DetailsWindow : Window
                 L10n.Instance["details.deepseek.task_label"];
             deepSeekModelLabel.Text =
                 L10n.Instance["details.deepseek.main_model_label"];
-            if (currentSnapshot != null)
+            if (currentSnapshot != null && !syncingContent)
                 UpdateContent(currentSnapshot);
         }
     }

@@ -95,7 +95,10 @@ public static class Diagnostics
                     "AGENTHALO_DIAGNOSTIC_APP_DIRECTORY");
             string previousTestMode = Environment.GetEnvironmentVariable(
                 "AGENTHALO_TEST_MODE");
+            string previousCodexHome = Environment.GetEnvironmentVariable("CODEX_HOME");
             Environment.SetEnvironmentVariable("AGENTHALO_TEST_MODE", "1");
+            Environment.SetEnvironmentVariable("CODEX_HOME",
+                Path.Combine(diagnosticAppDirectory, "codex-data"));
             Environment.SetEnvironmentVariable(
                 "AGENTHALO_DIAGNOSTIC_APP_DIRECTORY",
                 diagnosticAppDirectory);
@@ -180,19 +183,53 @@ public static class Diagnostics
                     new List<SessionSnapshot> { officialSnapshot }, officialProfile,
                     CodexUsageDataStatus.ApiKey).IsCustomApi,
                     "API key auth uses custom API panel");
+                Assert(!CodexCustomApiMetricsReader.Read(
+                    new List<SessionSnapshot> { officialSnapshot }, officialProfile,
+                    CodexUsageDataStatus.NoData).IsCustomApi,
+                    "missing OAuth keeps the official provider in quota mode");
 
                 string configTemp = Path.Combine(Path.GetTempPath(),
                     "agent-halo-codex-config-" + Guid.NewGuid().ToString("N") + ".toml");
-                File.WriteAllText(configTemp,
-                    "model = \"deepseek-v4\"\nmodel_provider = \"ccswitch\"\n" +
-                    "[model_providers.ccswitch]\nname = \"Private API\"\n" +
-                    "base_url = \"http://127.0.0.1:8317/v1\"\n",
-                    new UTF8Encoding(false));
-                CodexProviderProfile parsedProfile = CodexProviderProfileReader.Read(configTemp);
-                File.Delete(configTemp);
-                Assert(parsedProfile.IsCustomApi && parsedProfile.Model == "deepseek-v4" &&
-                    parsedProfile.ProviderName == "Private API",
-                    "Codex custom provider config detection");
+                try
+                {
+                    Assert(!CodexProviderProfileReader.Read(configTemp).IsCustomApi,
+                        "missing provider config uses official defaults");
+                    File.WriteAllText(configTemp,
+                        "model = \"deepseek-v4\"\nmodel_provider = \"ccswitch\"\n" +
+                        "[model_providers.ccswitch]\nname = \"Private API\"\n" +
+                        "base_url = \"http://127.0.0.1:8317/v1\"\n",
+                        new UTF8Encoding(false));
+                    CodexProviderProfile parsedProfile = CodexProviderProfileReader.Read(configTemp);
+                    Assert(parsedProfile.IsCustomApi && parsedProfile.Model == "deepseek-v4" &&
+                        parsedProfile.ProviderName == "Private API",
+                        "Codex config creation invalidates its cached miss");
+                    parsedProfile.Model = "caller mutation";
+                    using (FileStream lockedConfig = new FileStream(configTemp,
+                        FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+                    {
+                        Assert(CodexProviderProfileReader.Read(configTemp).Model == "deepseek-v4",
+                            "unchanged config returns an independent cached copy without rereading");
+                    }
+                    File.WriteAllText(configTemp,
+                        "model = \"official-model\"\nmodel_provider = \"openai\"\n",
+                        new UTF8Encoding(false));
+                    using (FileStream lockedConfig = new FileStream(configTemp,
+                        FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+                    {
+                        Assert(CodexProviderProfileReader.Read(configTemp).Model == null,
+                            "temporarily unreadable changed config is not cached");
+                    }
+                    CodexProviderProfile retriedProfile = CodexProviderProfileReader.Read(configTemp);
+                    Assert(!retriedProfile.IsCustomApi && retriedProfile.Model == "official-model",
+                        "config rewrite and transient failure retry use the new profile");
+                    File.Delete(configTemp);
+                    Assert(CodexProviderProfileReader.Read(configTemp).Model == null,
+                        "deleted config invalidates its cached profile");
+                }
+                finally
+                {
+                    File.Delete(configTemp);
+                }
 
                 File.AppendAllText(temp, "{\"timestamp\":\"" + now +
                     "\",\"type\":\"response_item\",\"payload\":{\"type\":\"reasoning\"}}\n",
@@ -614,8 +651,6 @@ public static class Diagnostics
                     "done uses long bright and short dim cadence");
                 Assert(HaloVisual.DiagnosticPowered(HaloState.Thinking, 1.0) > 0.85,
                     "thinking has a bright sustained plateau");
-                Assert(HaloVisual.DiagnosticPowered(HaloState.Working, 0.8) > 0.88,
-                    "working uses a bright sustained plateau");
                 Assert(HaloVisual.DiagnosticPowered(HaloState.Working, 6.35) < 0.35,
                     "working includes a shorter dim interval");
                 Assert(HaloVisual.DiagnosticTransitionLight(0.9, 0.8, 0.48) < 0.12,
@@ -713,6 +748,42 @@ public static class Diagnostics
                     false, false, topmostCheckUtc.AddSeconds(1),
                     nextRuntimeStateRefreshUtc),
                     "completed-state expiry and process exit refresh without a foreground change");
+                Assert(!HaloWindow.IsDimmedErrorDue(
+                    topmostCheckUtc.AddSeconds(59), topmostCheckUtc) &&
+                    HaloWindow.IsDimmedErrorDue(
+                        topmostCheckUtc.AddMinutes(1), topmostCheckUtc) &&
+                    !HaloWindow.IsDimmedErrorDue(topmostCheckUtc,
+                        DateTime.MinValue),
+                    "dimmed errors refresh at their one-minute deadline once");
+                AggregateSnapshot expiredError = new AggregateSnapshot
+                {
+                    State = HaloState.Error,
+                    FocusedAgent = AgentKind.Codex,
+                    Sessions = new List<SessionSnapshot>
+                    {
+                        new SessionSnapshot
+                        {
+                            State = HaloState.Error,
+                            ThreadId = "expired-error",
+                            LastEventUtc = topmostCheckUtc
+                        }
+                    }
+                };
+                Assert(HaloWindow.IsCurrentError(expiredError,
+                        AgentKind.Codex, "expired-error", topmostCheckUtc) &&
+                    !HaloWindow.IsCurrentError(expiredError,
+                        AgentKind.DeepSeekHarness, "expired-error", topmostCheckUtc) &&
+                    !HaloWindow.IsCurrentError(expiredError,
+                        AgentKind.Codex, "another-error", topmostCheckUtc),
+                    "dimmed error acknowledgement belongs to one provider and event");
+                foreach (HaloState replacement in new[]
+                    { HaloState.Working, HaloState.Attention })
+                {
+                    expiredError.State = replacement;
+                    Assert(!HaloWindow.IsCurrentError(expiredError,
+                            AgentKind.Codex, "expired-error", topmostCheckUtc),
+                        "expired error cannot replace a newer " + replacement);
+                }
                 Assert(CodexRuntimeReader.IsCodexDesktopProcessName("codex") &&
                     CodexRuntimeReader.IsCodexDesktopProcessName("Codex"),
                     "the Codex desktop executable is recognized case-insensitively");
@@ -1048,6 +1119,16 @@ public static class Diagnostics
                     {
                         return snapshot.ThreadId == "new-error";
                     }), "latest Windows error remains visible with active sessions");
+                HaloSettings acknowledgedErrorSettings = new HaloSettings();
+                acknowledgedErrorSettings.AcknowledgeError(AgentKind.Codex,
+                    newerError.LastEventUtc);
+                List<SessionSnapshot> afterErrorAcknowledgement =
+                    CodexSessionMonitor.SelectVisibleSessions(
+                        new[] { olderWorking, newerError }, acknowledgedErrorSettings,
+                        true, supersessionNow);
+                Assert(afterErrorAcknowledgement.Count == 1 &&
+                    afterErrorAcknowledgement[0].ThreadId == olderWorking.ThreadId,
+                    "acknowledged error reveals the remaining working task");
 
                 SessionSnapshot metadataOnly = new SessionSnapshot
                 {
@@ -1290,7 +1371,10 @@ public static class Diagnostics
 
                 RunProviderCoordinatorChecks();
                 RunDeepSeekAutomaticSetupChecks();
+                RunDeepSeekPollingCacheChecks();
                 RunDeepSeekIntegrationStateChecks();
+                RunCodexLogReviewChecks();
+                RunCodexAccountBoundaryChecks();
                 File.Delete(temp);
                 File.WriteAllText(outputPath,
                     "PASS\nLifecycle, Codex and DSH provider coordination, DSH automatic setup and task details, topmost guard, usage metrics, panel formatting, and animation checks passed.\n",
@@ -1309,8 +1393,212 @@ public static class Diagnostics
                     previousDiagnosticDirectory);
                 Environment.SetEnvironmentVariable("AGENTHALO_TEST_MODE",
                     previousTestMode);
+                Environment.SetEnvironmentVariable("CODEX_HOME", previousCodexHome);
                 TryDeleteSelfTestAppDirectory(diagnosticAppDirectory);
             }
+        }
+
+        private static void RunCodexLogReviewChecks()
+        {
+            string root = Path.Combine(Path.GetTempPath(),
+                "AgentHalo-review-" + Guid.NewGuid().ToString("N"));
+            string sessionRoot = Path.Combine(root, "sessions");
+            string quotaRoot = Path.Combine(root, "quota");
+            string quotaSessions = Path.Combine(quotaRoot, "sessions");
+            Directory.CreateDirectory(sessionRoot);
+            Directory.CreateDirectory(quotaSessions);
+            try
+            {
+                VerifySplitUtf8AndReplacement(sessionRoot);
+                VerifyQuotaScanAndInvalidation(quotaRoot, quotaSessions);
+                VerifySqliteQueryFailure(root);
+            }
+            finally
+            {
+                RateLimitReader.ClearCache(quotaRoot);
+                if (Directory.Exists(root))
+                {
+                    Directory.Delete(root, true);
+                }
+            }
+        }
+
+        private static void VerifySplitUtf8AndReplacement(string sessions)
+        {
+            string path = Path.Combine(sessions, "review.jsonl");
+            string splitLine = "{\"type\":\"session_meta\",\"payload\":{\"cwd\":\"C:\\\\临时\\\\🙂\"}}\n";
+            byte[] bytes = Encoding.UTF8.GetBytes(splitLine);
+            int emojiOffset = splitLine.IndexOf("🙂", StringComparison.Ordinal);
+            int split = Encoding.UTF8.GetByteCount(splitLine.Substring(0, emojiOffset)) + 2;
+            File.WriteAllBytes(path, Slice(bytes, 0, split));
+            SessionTracker splitTracker = new SessionTracker(path);
+            using (FileStream stream = new FileStream(path, FileMode.Append,
+                FileAccess.Write, FileShare.ReadWrite))
+            {
+                stream.Write(bytes, split, bytes.Length - split);
+            }
+            splitTracker.Refresh();
+            Assert(splitTracker.Snapshot.WorkingDirectory == @"C:\临时\🙂",
+                "UTF-8 code point split across reads was not preserved");
+
+            string oldMetadata = "{\"type\":\"session_meta\",\"payload\":{\"cwd\":\"C:\\\\old\"}}\n";
+            string newMetadata = oldMetadata.Replace(@"C:\\old", @"C:\\new");
+            Assert(oldMetadata.Length == newMetadata.Length,
+                "equal-length fixture is invalid");
+            File.WriteAllText(path, oldMetadata, new UTF8Encoding(false));
+            DateTime stamp = DateTime.UtcNow.AddMinutes(-2);
+            File.SetLastWriteTimeUtc(path, stamp);
+            SessionTracker equalLengthTracker = new SessionTracker(path);
+            File.WriteAllText(path, newMetadata, new UTF8Encoding(false));
+            File.SetLastWriteTimeUtc(path, stamp.AddMinutes(1));
+            equalLengthTracker.Refresh();
+            Assert(equalLengthTracker.Snapshot.WorkingDirectory == @"C:\new",
+                "equal-length rewrite was not rebuilt");
+
+            string activeLine = "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n";
+            string shorterMetadata = "{\"type\":\"session_meta\",\"payload\":{\"cwd\":\"x\"}}\n";
+            Assert(shorterMetadata.Length < activeLine.Length,
+                "truncation fixture is invalid");
+            File.WriteAllText(path, activeLine, new UTF8Encoding(false));
+            SessionTracker truncatedTracker = new SessionTracker(path);
+            Assert(truncatedTracker.Snapshot.Active, "task-start fixture is invalid");
+            File.WriteAllText(path, shorterMetadata, new UTF8Encoding(false));
+            truncatedTracker.Refresh();
+            Assert(!truncatedTracker.Snapshot.Active &&
+                truncatedTracker.Snapshot.WorkingDirectory == "x",
+                "truncation did not reset parser state");
+        }
+
+        private static void VerifyQuotaScanAndInvalidation(string root, string sessions)
+        {
+            RateLimitReader.ClearCache(root);
+            UsageMetrics metrics;
+            bool scanSucceeded;
+            Assert(!RateLimitReader.TryRead(root, out metrics, out scanSucceeded) &&
+                scanSucceeded, "empty quota scan should succeed without metrics");
+
+            string path = Path.Combine(sessions, "review.jsonl");
+            string valid = "{\"payload\":{\"rate_limits\":{\"weekly\":{\"used_percent\":37,\"window_minutes\":10080}},\"info\":{\"last_token_usage\":{\"input_tokens\":40},\"model_context_window\":100}}}";
+            string partialTail = "{\"payload\":{\"rate_limits\":";
+            File.WriteAllText(path, valid + "\n" + partialTail, new UTF8Encoding(false));
+            DateTime stamp = DateTime.UtcNow.AddMinutes(-1);
+            File.SetLastWriteTimeUtc(path, stamp);
+            RateLimitReader.InvalidateCachedPath(path);
+            Assert(RateLimitReader.TryRead(root, out metrics, out scanSucceeded) &&
+                scanSucceeded && metrics.WeeklyUsedPercent == 37 && metrics.HasContext,
+                "complete JSONL row was not read before an unfinished final row");
+            metrics.WeeklyUsedPercent = 99;
+            using (FileStream lockedLog = new FileStream(path, FileMode.Open,
+                FileAccess.ReadWrite, FileShare.None))
+            {
+                Assert(RateLimitReader.TryRead(root, out metrics, out scanSucceeded) &&
+                    scanSucceeded && metrics.WeeklyUsedPercent == 37,
+                    "unchanged quota returns an independent cache copy without reading the body");
+                RateLimitReader.InvalidateCachedPath(path);
+                Assert(RateLimitReader.TryRead(root, out metrics, out scanSucceeded) &&
+                    !scanSucceeded && metrics.WeeklyUsedPercent == 37,
+                    "transient quota I/O failure preserves the previous result");
+            }
+
+            File.WriteAllText(path, valid.Replace("\"used_percent\":37", "\"used_percent\":72") +
+                "\n" + partialTail, new UTF8Encoding(false));
+            File.SetLastWriteTimeUtc(path, stamp);
+            RateLimitReader.InvalidateCachedPath(path);
+            Assert(RateLimitReader.TryRead(root, out metrics, out scanSucceeded) &&
+                scanSucceeded && metrics.WeeklyUsedPercent == 72,
+                "same-size replacement did not invalidate quota cache");
+        }
+
+        private static void VerifySqliteQueryFailure(string root)
+        {
+            string path = Path.Combine(root, "query-failure.sqlite");
+            System.Reflection.BindingFlags flags = System.Reflection.BindingFlags.Static |
+                System.Reflection.BindingFlags.NonPublic;
+            object[] openArgs = { Encoding.UTF8.GetBytes(path + "\0"), IntPtr.Zero, 6, null };
+            int opened = (int)typeof(CodexSQLiteLogStore).GetMethod("sqlite3_open_v2", flags)
+                .Invoke(null, openArgs);
+            Assert(opened == 0, "temporary SQLite database opens");
+            typeof(CodexSQLiteLogStore).GetMethod("sqlite3_close", flags)
+                .Invoke(null, new[] { openArgs[1] });
+            using (CodexSQLiteLogStore store = new CodexSQLiteLogStore(path))
+            {
+                List<string> rows;
+                Assert(!store.TryQueryText("select case when value=0 then 'first-row' " +
+                        "else abs(-9223372036854775808) end from " +
+                        "(select 0 as value union all select 1)", out rows) && rows.Count == 0,
+                    "SQLite execution error discards rows returned before the failure");
+                Assert(store.TryQueryText("select 'recovered'", out rows) &&
+                    rows.Count == 1 && rows[0] == "recovered",
+                    "SQLite query reconnects successfully after execution failure");
+            }
+        }
+
+        private static byte[] Slice(byte[] source, int start, int count)
+        {
+            byte[] result = new byte[count];
+            Buffer.BlockCopy(source, start, result, 0, count);
+            return result;
+        }
+
+
+        private static void RunCodexAccountBoundaryChecks()
+        {
+            string root = AgentHaloPaths.CodexDataRootDirectory();
+            Directory.CreateDirectory(root);
+            string authPath = Path.Combine(root, "auth.json");
+            System.Reflection.BindingFlags flags = System.Reflection.BindingFlags.Instance |
+                System.Reflection.BindingFlags.NonPublic;
+            System.Reflection.ConstructorInfo constructor = typeof(CodexUsageMonitor)
+                .GetConstructor(flags, null, Type.EmptyTypes, null);
+            using (CodexUsageMonitor missing = (CodexUsageMonitor)constructor.Invoke(null))
+            {
+                Assert(missing.Status == CodexUsageDataStatus.NoData,
+                    "absent OAuth is not evidence of API-key authentication");
+            }
+            File.WriteAllText(authPath, "{unfinished");
+            using (CodexUsageMonitor malformed = (CodexUsageMonitor)constructor.Invoke(null))
+            {
+                Assert(malformed.Status == CodexUsageDataStatus.NoData,
+                    "malformed OAuth is not evidence of API-key authentication");
+            }
+            File.WriteAllText(authPath, "{\"OPENAI_API_KEY\":\"synthetic-test-key\"}");
+            using (CodexUsageMonitor monitor = (CodexUsageMonitor)constructor.Invoke(null))
+            {
+                Assert(monitor.Status == CodexUsageDataStatus.ApiKey,
+                    "explicit API-key credentials select API-key mode");
+                DateTime nowUtc = DateTime.UtcNow;
+                UsageMetrics accountA = new UsageMetrics
+                {
+                    HasFiveHour = true, FiveHourUsedPercent = 88,
+                    HasWeekly = true, WeeklyUsedPercent = 77,
+                    HasMonthly = true, MonthlyUsedPercent = 66,
+                    ContextInputTokens = 50, ContextWindowTokens = 100
+                };
+                typeof(CodexUsageMonitor).GetField("localMetrics", flags).SetValue(monitor, accountA);
+                typeof(CodexUsageMonitor).GetField("remoteMetrics", flags).SetValue(monitor, accountA);
+                typeof(CodexUsageMonitor).GetField("observedAccountKey", flags).SetValue(monitor, "synthetic-A");
+                typeof(CodexUsageMonitor).GetField("remoteAccountKey", flags).SetValue(monitor, "synthetic-A");
+                CodexOAuthAccess accountB = new CodexOAuthAccess { AccountKey = "synthetic-B" };
+                typeof(CodexUsageMonitor).GetMethod("ObserveAccount", flags)
+                    .Invoke(monitor, new object[] { accountB, 0L });
+                typeof(CodexUsageMonitor).GetMethod("LoadCacheForAccess", flags, null,
+                    new[] { typeof(CodexOAuthAccess), typeof(long) }, null)
+                    .Invoke(monitor, new object[] { accountB, 0L });
+                UsageMetrics afterFailure;
+                monitor.TryReadCached(out afterFailure);
+                Assert(!afterFailure.HasFiveHour && !afterFailure.HasWeekly &&
+                    !afterFailure.HasMonthly && afterFailure.ContextInputTokens == 50,
+                    "B without cache cannot inherit A quota after a failed request");
+                typeof(CodexUsageMonitor).GetField("remoteMetrics", flags).SetValue(monitor,
+                    new UsageMetrics { HasFiveHour = true, FiveHourUsedPercent = 13,
+                        FiveHourResetUtc = nowUtc.AddHours(2) });
+                UsageMetrics partialB;
+                monitor.TryReadCached(out partialB);
+                Assert(partialB.HasFiveHour && partialB.FiveHourUsedPercent == 13 &&
+                    !partialB.HasWeekly && !partialB.HasMonthly && partialB.HasContext,
+                    "partial B quota restores B data while missing buckets stay unattributed");
+            }
+            File.Delete(authPath);
         }
 
         private static void RunDeepSeekAutomaticSetupChecks()
@@ -1332,6 +1620,22 @@ public static class Diagnostics
             File.Delete(profileLock);
             Assert(setup.TryInstall(), "DSH first-run observer installs from embedded resource");
             string observer = Path.Combine(app, "integrations", "deepseek-harness", "observer", "index.mjs");
+            string nestedArrayPatch =
+                "# keep the user's empty value\r\n" +
+                "- insert:\r\n" +
+                "    - id: user-plugin\r\n" +
+                "      name: user-module\r\n" +
+                "      config:\r\n" +
+                "        enabledItems:\r\n" +
+                "          []\r\n";
+            string nestedArrayRegistered = DeepSeekHarnessSetup.RegisterObserver(
+                nestedArrayPatch, observer);
+            Assert(nestedArrayRegistered.StartsWith(nestedArrayPatch,
+                    StringComparison.Ordinal) &&
+                nestedArrayRegistered.Contains("enabledItems:\r\n          []\r\n") &&
+                DeepSeekHarnessSetup.RegisterObserver(nestedArrayRegistered, observer) ==
+                    nestedArrayRegistered,
+                "DSH registration preserves nested empty arrays and repeated registration");
             string registered = File.ReadAllText(patchPath);
             Assert(File.Exists(observer) && File.ReadAllText(observer).Contains("export function apply(ctx)") &&
                 registered.Contains("fresh user''s app") && !registered.Contains("[]") &&
@@ -1482,6 +1786,243 @@ public static class Diagnostics
             }
         }
 
+
+        private static void RunDeepSeekPollingCacheChecks()
+        {
+            string root = Path.Combine(Path.GetTempPath(),
+                "agenthalo-dsh-poll-" + Guid.NewGuid().ToString("N"));
+            string runtime = Path.Combine(root, "runtime");
+            string snapshotPath = Path.Combine(runtime, "review-instance.json");
+            DateTime sampleUtc = DateTime.UtcNow;
+            DateTime failedUtc = sampleUtc.AddMinutes(-1);
+            Directory.CreateDirectory(runtime);
+            try
+            {
+                File.WriteAllText(snapshotPath, CreateDshReviewSnapshot(runtime,
+                    sampleUtc, 1), new UTF8Encoding(false));
+
+                CountingDshProcessValidator validator =
+                    new CountingDshProcessValidator(sampleUtc.AddHours(-1), 200);
+                DeepSeekHarnessAgentProvider provider =
+                    new DeepSeekHarnessAgentProvider(
+                        new DeepSeekHarnessSnapshotReader(runtime, validator));
+                try
+                {
+                    provider.Start();
+                    // The delay lets a former zero-delay timer queue behind Start's
+                    // initial read; the current one-second timer must not poll here.
+                    Thread.Sleep(100);
+                    Assert(validator.Calls == 1,
+                        "DSH Start performs one initial snapshot read");
+
+                    HaloSettings settings = new HaloSettings();
+                    AgentProviderSnapshot initial = provider.Read(settings, sampleUtc);
+                    Assert(initial.Sessions.Count == 3 &&
+                        initial.Sessions[0].ThreadId == "failed-root" &&
+                        initial.Sessions[0].State == HaloState.Error &&
+                        validator.Calls == 1,
+                        "DSH Read uses the cached snapshot and selects its failed root");
+
+                    settings.AcknowledgeError(AgentKind.DeepSeekHarness, failedUtc);
+                    AgentProviderSnapshot acknowledged = provider.Read(settings,
+                        sampleUtc.AddMinutes(1));
+                    Assert(acknowledged.Sessions[0].ThreadId == "working-root" &&
+                        acknowledged.Sessions[0].State == HaloState.Working &&
+                        validator.Calls == 1,
+                        "DSH acknowledgement selects a remaining task without another read");
+
+                    AgentProviderSnapshot beforeExpiry = provider.Read(settings,
+                        sampleUtc.AddMinutes(3));
+                    SessionSnapshot recentDone = beforeExpiry.Sessions.FirstOrDefault(
+                        delegate(SessionSnapshot session)
+                        {
+                            return session.ThreadId == "done-root";
+                        });
+                    AgentProviderSnapshot afterExpiry = provider.Read(settings,
+                        sampleUtc.AddMinutes(7));
+                    SessionSnapshot expiredDone = afterExpiry.Sessions.FirstOrDefault(
+                        delegate(SessionSnapshot session)
+                        {
+                            return session.ThreadId == "done-root";
+                        });
+                    Assert(recentDone != null && recentDone.State == HaloState.Done &&
+                        expiredDone != null && expiredDone.State == HaloState.Idle &&
+                        validator.Calls == 1,
+                        "DSH completion expiry is recomputed from the cached snapshot");
+
+                    settings.Paused = true;
+                    provider.Read(settings, sampleUtc.AddMinutes(7));
+                    Assert(validator.Calls == 1,
+                        "DSH pause does not read the snapshot");
+                    settings.Paused = false;
+                    provider.Read(settings, sampleUtc.AddMinutes(7));
+                    Assert(validator.Calls == 2,
+                        "DSH resume performs one immediate read with the current settings");
+                    provider.Read(settings, sampleUtc.AddMinutes(7));
+                    Assert(validator.Calls == 2,
+                        "DSH resumed Read continues to use the cached snapshot");
+
+                    Assert(provider.Refresh() && validator.Calls == 3,
+                        "DSH explicit Refresh performs one immediate read");
+                }
+                finally
+                {
+                    provider.Dispose();
+                }
+
+                CountingDshProcessValidator revisionValidator =
+                    new CountingDshProcessValidator(sampleUtc.AddHours(-1), 0);
+                DeepSeekHarnessSnapshotReader reader =
+                    new DeepSeekHarnessSnapshotReader(runtime, revisionValidator);
+                long firstTicks = Stopwatch.GetTimestamp();
+                DeepSeekHarnessReadResult fresh = reader.Read(sampleUtc, firstTicks);
+                Assert(fresh.Instances.Count == 1 && fresh.Instances[0].Fresh,
+                    "DSH initial revision is fresh");
+
+                DateTime staleUtc = sampleUtc.AddSeconds(11);
+                long staleTicks = firstTicks + (long)Math.Ceiling(
+                    (DeepSeekHarnessSnapshotReader.RevisionTimeout.TotalSeconds + 1) *
+                    Stopwatch.Frequency);
+                DeepSeekHarnessReadResult stale = reader.Read(staleUtc, staleTicks);
+                Assert(stale.Instances.Count == 1 && !stale.Instances[0].Fresh,
+                    "DSH unchanged revision becomes stale after its progress timeout");
+
+                File.WriteAllText(snapshotPath, CreateDshReviewSnapshot(runtime,
+                    staleUtc, 2), new UTF8Encoding(false));
+                DeepSeekHarnessReadResult progressed = reader.Read(staleUtc,
+                    staleTicks + 1);
+                Assert(progressed.Instances.Count == 1 &&
+                    progressed.Instances[0].Fresh &&
+                    progressed.Instances[0].Document.revision == 2,
+                    "DSH higher revision restores freshness");
+            }
+            finally
+            {
+                if (Directory.Exists(root))
+                {
+                    Directory.Delete(root, true);
+                }
+            }
+        }
+
+        private static string CreateDshReviewSnapshot(string runtime,
+            DateTime publishedUtc, long revision)
+        {
+            string profile = AgentHaloPaths.DeepSeekHarnessDesktopProfileDirectory();
+            string executable = Path.Combine(Path.GetDirectoryName(runtime),
+                "synthetic-node.exe");
+            DateTime hostStartUtc = new DateTime(2026, 1, 1, 0, 0, 0,
+                DateTimeKind.Utc);
+            JavaScriptSerializer serializer = new JavaScriptSerializer();
+            Dictionary<string, object> capabilities = new Dictionary<string, object>
+            {
+                { "lifecycle", true },
+                { "toolName", true },
+                { "attention", true },
+                { "subagents", true },
+                { "actualModel", false },
+                { "nextModel", false }
+            };
+            Dictionary<string, object> document = new Dictionary<string, object>
+            {
+                { "schemaVersion", 1 },
+                { "bridgeVersion", "1.0.0" },
+                { "dshVersion", "0.2.0-rc.2" },
+                { "profile", "desktop" },
+                { "instanceId", "review-instance" },
+                { "hostPid", 40001 },
+                { "hostStartUtc", hostStartUtc.ToString("o", CultureInfo.InvariantCulture) },
+                { "hostExecutable", executable },
+                { "hostParentPid", 40002 },
+                { "hostRuntime", "electron-node" },
+                { "desktopAppId", "com.deepseek.dsh" },
+                { "hostProfileDir", profile },
+                { "hostRuntimeDir", runtime },
+                { "revision", revision },
+                { "publishedAtUtc", publishedUtc.ToString("o", CultureInfo.InvariantCulture) },
+                { "baselineReady", true },
+                { "capabilities", capabilities },
+                { "tasks", new object[]
+                    {
+                        CreateDshReviewTask("failed-root", "failed-turn", false,
+                            false, 0, "error", publishedUtc.AddMinutes(-1)),
+                        CreateDshReviewTask("working-root", "working-turn", true,
+                            true, 1, null, DateTime.MinValue),
+                        CreateDshReviewTask("done-root", "done-turn", false,
+                            false, 0, "completed", publishedUtc.AddMinutes(-1))
+                    }
+                }
+            };
+            return serializer.Serialize(document);
+        }
+
+        private static Dictionary<string, object> CreateDshReviewTask(string rootId,
+            string turnId, bool running, bool rootRunning, int activeToolCount,
+            string terminalKind, DateTime endedUtc)
+        {
+            Dictionary<string, object> task = new Dictionary<string, object>
+            {
+                { "rootSessionId", rootId },
+                { "title", rootId },
+                { "turnId", turnId },
+                { "running", running },
+                { "rootRunning", rootRunning },
+                { "relatedRunning", 0 },
+                { "relationsResolved", true },
+                { "activeToolCount", activeToolCount },
+                { "activeToolNames", activeToolCount > 0
+                    ? new[] { "read_file" } : new string[0] },
+                { "pendingApprovalCount", 0 },
+                { "blockingQuestionCount", 0 },
+                { "lastActivityUtc", DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture) },
+                { "mainModel", null },
+                { "nextModel", null },
+                { "terminal", terminalKind == null ? null :
+                    new Dictionary<string, object>
+                    {
+                        { "turnId", turnId },
+                        { "kind", terminalKind },
+                        { "endedAtUtc", endedUtc.ToString("o", CultureInfo.InvariantCulture) }
+                    }
+                }
+            };
+            return task;
+        }
+
+        private sealed class CountingDshProcessValidator :
+            IDeepSeekHarnessProcessValidator
+        {
+            private int calls;
+            private readonly DateTime parentStartUtc;
+            private readonly int firstCallDelayMilliseconds;
+
+            public int Calls
+            {
+                get { return Interlocked.CompareExchange(ref calls, 0, 0); }
+            }
+
+            public CountingDshProcessValidator(DateTime parentStartUtc,
+                int firstCallDelayMilliseconds)
+            {
+                this.parentStartUtc = parentStartUtc;
+                this.firstCallDelayMilliseconds = firstCallDelayMilliseconds;
+            }
+
+            public DeepSeekHarnessProcessValidation Validate(
+                DeepSeekHarnessSnapshotDocument document)
+            {
+                int call = Interlocked.Increment(ref calls);
+                if (call == 1 && firstCallDelayMilliseconds > 0)
+                {
+                    Thread.Sleep(firstCallDelayMilliseconds);
+                }
+                return new DeepSeekHarnessProcessValidation
+                {
+                    Check = DeepSeekHarnessProcessCheck.Valid,
+                    ParentStartUtc = parentStartUtc
+                };
+            }
+        }
 
         private static void RunProviderCoordinatorChecks()
         {
@@ -1694,6 +2235,14 @@ public static class Diagnostics
         {
             AgentProviderCatalog catalog = new AgentProviderCatalog();
             JavaScriptSerializer serializer = new JavaScriptSerializer();
+            Directory.CreateDirectory(SettingsStorage.AppDirectory);
+            File.WriteAllText(SettingsStorage.SettingsPath,
+                "{\"InstalledAt\":\"not-a-date\",\"HaloScalePercent\":100}");
+            HaloSettings repairedInstall = SettingsStorage.Load();
+            DateTime installedUtc = repairedInstall.GetInstalledUtc();
+            Assert(installedUtc == repairedInstall.GetInstalledUtc() &&
+                installedUtc == SettingsStorage.Load().GetInstalledUtc(),
+                "invalid installation time is repaired once and persisted");
             Assert(catalog.Descriptors.Single(delegate(
                     AgentProviderDescriptor descriptor)
                 {
@@ -2113,16 +2662,14 @@ public static class Diagnostics
                 "details.deepseek.model_source.current_turn";
 
             DetailsWindow panel = new DetailsWindow();
-            panel.SetEnabledAgents(new[]
-            {
-                AgentKind.Codex, AgentKind.DeepSeekHarness
-            });
-            panel.UpdateContent(codex);
+            IList<AgentProviderDescriptor> descriptors =
+                new AgentProviderCatalog().Descriptors;
+            panel.SyncContent(codex, descriptors, true);
             Assert(panel.SelectedAgentForDiagnostics == AgentKind.Codex &&
                 panel.QuotaVisibleForDiagnostics &&
                 panel.ContextVisibleForDiagnostics,
                 "Codex details display quota and context");
-            panel.UpdateContent(deepSeekHarness);
+            panel.SyncContent(deepSeekHarness, descriptors, true);
             Assert(panel.SelectedAgentForDiagnostics ==
                     AgentKind.DeepSeekHarness &&
                 panel.DeepSeekTaskVisibleForDiagnostics &&
@@ -2163,6 +2710,11 @@ public static class Diagnostics
                 !panel.DeepSeekTaskVisibleForDiagnostics &&
                 panel.ContextVisibleForDiagnostics,
                 "switching back restores the injected Codex details");
+            panel.SyncContent(codex, descriptors, false);
+            Assert(panel.SelectedAgentForDiagnostics == AgentKind.Codex &&
+                panel.InformationVisibleForDiagnostics &&
+                !panel.DeepSeekTaskVisibleForDiagnostics,
+                "showing cached details applies the latest provider and pause settings together");
             panel.Close();
             Assert(CodexUsageMonitor.InstanceCreatedForDiagnostics ==
                     usageCreatedBefore,
@@ -2887,10 +3439,8 @@ public static class Diagnostics
             string fileName, AgentProviderSnapshot snapshot)
         {
             DetailsWindow panel = new DetailsWindow();
-            panel.SetEnabledAgents(new[]
-            {
-                AgentKind.Codex, AgentKind.DeepSeekHarness
-            });
+            panel.SetEnabledAgentDescriptors(
+                new AgentProviderCatalog().Descriptors);
             panel.UpdateContent(snapshot);
             FrameworkElement panelContent = panel.Content as FrameworkElement;
             panel.Content = null;

@@ -4,8 +4,7 @@ public struct CodexFailureReader: Sendable {
     public var logStore: CodexSQLiteLogStore
 
     public init(
-        databaseURL: URL = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".codex", isDirectory: true)
+        databaseURL: URL = CodexPaths.dataRoot
             .appendingPathComponent("logs_2.sqlite")
     ) {
         self.logStore = CodexSQLiteLogStore(databaseURL: databaseURL)

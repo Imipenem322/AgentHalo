@@ -133,14 +133,62 @@ internal sealed class DeepSeekHarnessSetup
                     patch.Substring(valueStart + value.Length);
             }
 
-            // DSH's empty profile template can contain comments followed by [].
-            patch = Regex.Replace(patch, @"(?m)^[ \t]*\[\][ \t]*(?<comment>#[^\r\n]*)?\r?$",
-                "${comment}");
+            // Replace only an empty root document, not [] values nested in
+            // unrelated plugin configuration.
+            patch = RemoveRootEmptySequence(patch);
             string newline = patch.Contains("\r\n") ? "\r\n" : "\n";
             if (patch.Length > 0 && !patch.EndsWith("\n")) patch += newline;
             return patch + "- insert:" + newline +
                 "    - id: " + PluginId + newline +
                 "      name: " + quotedPath + newline;
+        }
+
+        private static string RemoveRootEmptySequence(string patch)
+        {
+            int emptyStart = -1;
+            int emptyLength = 0;
+            string indentation = String.Empty;
+            string comment = null;
+            string lineEnding = String.Empty;
+            MatchCollection lines = Regex.Matches(patch,
+                @"(?<content>[^\r\n]*)(?<ending>\r\n|\n|\r|$)");
+            foreach (Match line in lines)
+            {
+                string content = line.Groups["content"].Value;
+                if (content.Length == 0 &&
+                    line.Groups["ending"].Length == 0)
+                {
+                    continue;
+                }
+                string trimmed = content.TrimStart(' ', '\t');
+                if (String.IsNullOrWhiteSpace(content) ||
+                    trimmed.StartsWith("#", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                Match empty = Regex.Match(content,
+                    @"^(?<indent>[ \t]*)\[\][ \t]*(?<comment>#[^\r\n]*)?$");
+                if (!empty.Success || emptyStart >= 0)
+                {
+                    return patch;
+                }
+                emptyStart = line.Index;
+                emptyLength = line.Length;
+                indentation = empty.Groups["indent"].Value;
+                comment = empty.Groups["comment"].Success
+                    ? empty.Groups["comment"].Value : null;
+                lineEnding = line.Groups["ending"].Value;
+            }
+
+            if (emptyStart < 0)
+            {
+                return patch;
+            }
+            string replacement = comment == null
+                ? String.Empty : indentation + comment;
+            return patch.Substring(0, emptyStart) + replacement + lineEnding +
+                patch.Substring(emptyStart + emptyLength);
         }
 
         private static void WriteIfChanged(string path, string text)

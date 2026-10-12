@@ -68,7 +68,21 @@ public sealed class HaloSettings
             {
                 return parsed.ToUniversalTime();
             }
-            return DateTime.UtcNow;
+            DateTime installedUtc = DateTime.UtcNow;
+            InstalledAt = installedUtc.ToString("o", CultureInfo.InvariantCulture);
+            return installedUtc;
+        }
+
+        internal bool NormalizeInstalledAt()
+        {
+            DateTime parsed;
+            if (DateTime.TryParse(InstalledAt, CultureInfo.InvariantCulture,
+                    DateTimeStyles.RoundtripKind, out parsed))
+            {
+                return false;
+            }
+            GetInstalledUtc();
+            return true;
         }
 
         public DateTime GetAcknowledgedUtc(string threadId)
@@ -397,9 +411,8 @@ public static class SettingsStorage
                                 new Dictionary<string, string>();
                             repaired = true;
                         }
-                        if (String.IsNullOrEmpty(result.InstalledAt))
+                        if (result.NormalizeInstalledAt())
                         {
-                            result.InstalledAt = DateTime.UtcNow.ToString("o");
                             repaired = true;
                         }
                         if (result.Paused)

@@ -17,23 +17,106 @@ internal sealed class CodexProviderProfile
 
 internal static class CodexProviderProfileReader
     {
+        private static readonly object cacheGate = new object();
+        private static string cachedPath;
+        private static bool cachedExists;
+        private static long cachedLength;
+        private static DateTime cachedLastWriteUtc;
+        private static CodexProviderProfile cachedProfile;
+
         public static CodexProviderProfile Read()
         {
-            string codexHome = Environment.GetEnvironmentVariable("CODEX_HOME");
-            string path = String.IsNullOrWhiteSpace(codexHome)
-                ? Path.Combine(Environment.GetFolderPath(
-                    Environment.SpecialFolder.UserProfile), ".codex", "config.toml")
-                : Path.Combine(codexHome, "config.toml");
-            return Read(path);
+            return Read(Path.Combine(AgentHaloPaths.CodexDataRootDirectory(),
+                "config.toml"));
         }
 
         internal static CodexProviderProfile Read(string path)
         {
-            CodexProviderProfile profile = new CodexProviderProfile();
-            if (String.IsNullOrWhiteSpace(path) || !File.Exists(path))
+            string fullPath;
+            bool exists;
+            long length;
+            DateTime lastWriteUtc;
+            if (!TryGetSignature(path, out fullPath, out exists, out length,
+                out lastWriteUtc))
             {
-                return profile;
+                return new CodexProviderProfile();
             }
+
+            lock (cacheGate)
+            {
+                if (String.Equals(cachedPath, fullPath,
+                        StringComparison.OrdinalIgnoreCase) &&
+                    cachedExists == exists && cachedLength == length &&
+                    cachedLastWriteUtc == lastWriteUtc && cachedProfile != null)
+                {
+                    return Clone(cachedProfile);
+                }
+            }
+
+            CodexProviderProfile profile = new CodexProviderProfile();
+            if (exists && !TryReadProfile(fullPath, out profile))
+            {
+                return new CodexProviderProfile();
+            }
+
+            lock (cacheGate)
+            {
+                cachedPath = fullPath;
+                cachedExists = exists;
+                cachedLength = length;
+                cachedLastWriteUtc = lastWriteUtc;
+                cachedProfile = Clone(profile);
+            }
+            return Clone(profile);
+        }
+
+        private static bool TryGetSignature(string path, out string fullPath,
+            out bool exists, out long length, out DateTime lastWriteUtc)
+        {
+            fullPath = null;
+            exists = false;
+            length = 0;
+            lastWriteUtc = DateTime.MinValue;
+            if (String.IsNullOrWhiteSpace(path))
+            {
+                return false;
+            }
+            try
+            {
+                fullPath = Path.GetFullPath(path);
+                FileAttributes attributes = File.GetAttributes(fullPath);
+                if ((attributes & FileAttributes.Directory) != 0)
+                {
+                    fullPath = null;
+                    return false;
+                }
+                FileInfo info = new FileInfo(fullPath);
+                exists = true;
+                length = info.Length;
+                lastWriteUtc = info.LastWriteTimeUtc;
+                return true;
+            }
+            catch (FileNotFoundException)
+            {
+                exists = false;
+                return true;
+            }
+            catch (DirectoryNotFoundException)
+            {
+                exists = false;
+                return true;
+            }
+            catch
+            {
+                fullPath = null;
+                return false;
+            }
+        }
+
+        private static bool TryReadProfile(string path,
+            out CodexProviderProfile profile)
+        {
+            profile = new CodexProviderProfile();
             try
             {
                 string section = String.Empty;
@@ -106,12 +189,26 @@ internal static class CodexProviderProfileReader
                 }
                 profile.IsCustomApi = IsCustomProvider(profile.ProviderId,
                     profile.BaseUrl);
+                return true;
             }
             catch (Exception ex)
             {
                 SettingsStorage.Log("Codex provider config read failed: " + ex.Message);
+                profile = new CodexProviderProfile();
+                return false;
             }
-            return profile;
+        }
+
+        private static CodexProviderProfile Clone(CodexProviderProfile source)
+        {
+            return new CodexProviderProfile
+            {
+                Model = source.Model,
+                ProviderId = source.ProviderId,
+                ProviderName = source.ProviderName,
+                BaseUrl = source.BaseUrl,
+                IsCustomApi = source.IsCustomApi
+            };
         }
 
         internal static bool IsCustomProvider(string providerId, string baseUrl)

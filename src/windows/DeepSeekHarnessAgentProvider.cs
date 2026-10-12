@@ -19,6 +19,7 @@ internal sealed class DeepSeekHarnessAgentProvider : IAgentProvider
         private Timer timer;
         private bool active;
         private bool disposed;
+        private bool lastReadPaused;
         private string selectedRootId = String.Empty;
         private HaloSettings lastSettings = new HaloSettings();
         private AgentProviderSnapshot lastSnapshot;
@@ -68,10 +69,23 @@ internal sealed class DeepSeekHarnessAgentProvider : IAgentProvider
                 {
                     return;
                 }
+                lastReadPaused = lastSettings.Paused;
                 active = true;
-                timer = new Timer(OnTimer, null, 0, 1000);
             }
-            Poll(false);
+            try
+            {
+                Poll(false);
+            }
+            finally
+            {
+                lock (pollGate)
+                {
+                    if (active && !disposed && timer == null)
+                    {
+                        timer = new Timer(OnTimer, null, 1000, 1000);
+                    }
+                }
+            }
         }
 
         public void Stop()
@@ -113,20 +127,23 @@ internal sealed class DeepSeekHarnessAgentProvider : IAgentProvider
             lock (pollGate)
             {
                 ThrowIfDisposed();
+                bool wasPaused = lastReadPaused;
                 if (settings != null)
                 {
                     lastSettings = settings;
                 }
-                if (lastSettings.Paused)
+                bool isPaused = lastSettings.Paused;
+                lastReadPaused = isPaused;
+                if (isPaused)
                 {
                     lastSnapshot = DeepSeekHarnessSnapshotReducer.BuildPaused(
                         lastSnapshot, lastRead);
                 }
                 else
                 {
-                    if (active)
+                    if (active && wasPaused)
                     {
-                        lastRead = snapshotReader.Read(nowUtc);
+                        Poll(false, nowUtc);
                     }
                     lastSnapshot = BuildFromCache(lastSettings, nowUtc);
                 }
@@ -200,6 +217,11 @@ internal sealed class DeepSeekHarnessAgentProvider : IAgentProvider
 
         private void Poll(bool notify)
         {
+            Poll(notify, DateTime.UtcNow);
+        }
+
+        private void Poll(bool notify, DateTime nowUtc)
+        {
             bool changed;
             lock (pollGate)
             {
@@ -211,9 +233,10 @@ internal sealed class DeepSeekHarnessAgentProvider : IAgentProvider
                 {
                     return;
                 }
+                lastReadPaused = false;
                 AgentProviderSnapshot previous = lastSnapshot;
-                lastRead = snapshotReader.Read(DateTime.UtcNow);
-                lastSnapshot = BuildFromCache(lastSettings, DateTime.UtcNow);
+                lastRead = snapshotReader.Read(nowUtc);
+                lastSnapshot = BuildFromCache(lastSettings, nowUtc);
                 changed = DeepSeekHarnessSnapshotReducer.SnapshotChanged(
                     previous, lastSnapshot);
             }

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO;
 using System.Runtime.InteropServices;
 using System.Threading;
 
@@ -18,13 +19,15 @@ internal sealed class CodexAgentProvider : IAgentProvider
 
         private readonly CodexSessionMonitor monitor;
         private readonly CodexUsageMonitor usageMonitor;
+        private readonly string codexDataRoot;
         private long usageActivationEpoch;
         private volatile bool active;
         private volatile bool disposed;
 
         public CodexAgentProvider()
         {
-            monitor = new CodexSessionMonitor();
+            codexDataRoot = AgentHaloPaths.CodexDataRootDirectory();
+            monitor = new CodexSessionMonitor(codexDataRoot);
             usageMonitor = CodexUsageMonitor.Instance;
             monitor.Changed += OnMonitorChanged;
             usageMonitor.UpdatedForActivation += OnUsageUpdated;
@@ -131,6 +134,7 @@ internal sealed class CodexAgentProvider : IAgentProvider
             }
             HaloSettings effectiveSettings = settings ?? new HaloSettings();
             bool codexRunning = CodexRuntimeReader.IsRunning();
+            monitor.SetCodexRunning(codexRunning);
             AggregateSnapshot aggregate = monitor.GetAggregate(
                 effectiveSettings, codexRunning);
             if (codexRunning && aggregate.Presence ==
@@ -139,7 +143,7 @@ internal sealed class CodexAgentProvider : IAgentProvider
                 string appFailure;
                 DateTime appFailureUtc;
                 bool hasAppFailure = CodexFailureReader.TryReadRecent(
-                    out appFailure, out appFailureUtc);
+                    codexDataRoot, out appFailure, out appFailureUtc);
                 ApplyApplicationFailure(aggregate, effectiveSettings,
                     codexRunning, hasAppFailure, appFailure, appFailureUtc);
             }
@@ -152,7 +156,8 @@ internal sealed class CodexAgentProvider : IAgentProvider
             }
             CodexCustomApiMetrics customMetrics =
                 CodexCustomApiMetricsReader.Read(sessions,
-                    CodexProviderProfileReader.Read(), usageMonitor.Status);
+                    CodexProviderProfileReader.Read(Path.Combine(codexDataRoot,
+                        "config.toml")), usageMonitor.Status);
 
             return new AgentProviderSnapshot
             {

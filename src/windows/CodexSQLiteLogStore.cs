@@ -18,20 +18,35 @@ internal sealed class CodexSQLiteLogStore : IDisposable
 
         public static readonly CodexSQLiteLogStore Shared =
             new CodexSQLiteLogStore(Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-                ".codex", "logs_2.sqlite"));
+                AgentHaloPaths.CodexDataRootDirectory(), "logs_2.sqlite"));
 
         internal CodexSQLiteLogStore(string path)
         {
             databasePath = path;
         }
 
+        internal string DatabasePath
+        {
+            get { return databasePath; }
+        }
+
         public List<string> QueryText(string query)
         {
             List<string> rows = new List<string>();
-            if (nativeUnavailable || !File.Exists(databasePath))
+            TryQueryText(query, out rows);
+            return rows;
+        }
+
+        internal bool TryQueryText(string query, out List<string> rows)
+        {
+            rows = new List<string>();
+            if (nativeUnavailable)
             {
-                return rows;
+                return false;
+            }
+            if (!File.Exists(databasePath))
+            {
+                return true;
             }
             lock (sync)
             {
@@ -40,13 +55,13 @@ internal sealed class CodexSQLiteLogStore : IDisposable
                 {
                     if (!EnsureConnection())
                     {
-                        return rows;
+                        return false;
                     }
                     if (sqlite3_prepare_v2(connection, query, -1, out statement,
                         IntPtr.Zero) != 0 || statement == IntPtr.Zero)
                     {
-                        ResetConnection();
-                        return rows;
+                        ResetFailedQuery(ref statement);
+                        return false;
                     }
                     int step;
                     while ((step = sqlite3_step(statement)) == SqliteRow)
@@ -59,23 +74,31 @@ internal sealed class CodexSQLiteLogStore : IDisposable
                     }
                     if (step != SqliteDone)
                     {
-                        ResetConnectionAfter(statement);
-                        statement = IntPtr.Zero;
+                        ResetFailedQuery(ref statement);
+                        rows.Clear();
+                        return false;
                     }
+                    return true;
                 }
                 catch (DllNotFoundException)
                 {
                     nativeUnavailable = true;
-                    ResetConnection();
+                    ResetFailedQuery(ref statement);
+                    rows.Clear();
+                    return false;
                 }
                 catch (EntryPointNotFoundException)
                 {
                     nativeUnavailable = true;
-                    ResetConnection();
+                    ResetFailedQuery(ref statement);
+                    rows.Clear();
+                    return false;
                 }
                 catch
                 {
-                    ResetConnection();
+                    ResetFailedQuery(ref statement);
+                    rows.Clear();
+                    return false;
                 }
                 finally
                 {
@@ -85,7 +108,6 @@ internal sealed class CodexSQLiteLogStore : IDisposable
                     }
                 }
             }
-            return rows;
         }
 
         private bool EnsureConnection()
@@ -106,11 +128,12 @@ internal sealed class CodexSQLiteLogStore : IDisposable
             return true;
         }
 
-        private void ResetConnectionAfter(IntPtr statement)
+        private void ResetFailedQuery(ref IntPtr statement)
         {
             if (statement != IntPtr.Zero)
             {
                 sqlite3_finalize(statement);
+                statement = IntPtr.Zero;
             }
             ResetConnection();
         }

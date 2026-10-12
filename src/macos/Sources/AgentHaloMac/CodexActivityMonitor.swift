@@ -91,12 +91,6 @@ final class CodexActivityMonitor: @unchecked Sendable {
         }
     }
 
-    func requestRefresh() {
-        queue.async { [weak self] in
-            self?.poll(forceFailure: true, forceRealtime: true)
-        }
-    }
-
     func snapshot() -> CodexActivitySnapshot {
         queue.sync {
             latestSnapshot
@@ -113,27 +107,27 @@ final class CodexActivityMonitor: @unchecked Sendable {
             leeway: .milliseconds(leeway)
         )
         next.setEventHandler { [weak self] in
-            self?.poll(forceFailure: false, forceRealtime: false)
+            self?.poll()
         }
         timer = next
         currentIntervalMilliseconds = intervalMilliseconds
         next.resume()
     }
 
-    private func poll(forceFailure: Bool, forceRealtime: Bool) {
+    private func poll() {
         let now = Date()
         _ = sessionMonitor.refresh(now: now)
 
         var nextSnapshot = latestSnapshot
         nextSnapshot.sessions = sessionMonitor.snapshots()
 
-        if forceFailure || now.timeIntervalSince(lastFailurePollAt) >= 2 {
+        if now.timeIntervalSince(lastFailurePollAt) >= 2 {
             lastFailurePollAt = now
             nextSnapshot.recentFailure = failureReader.readRecent(now: now)
         }
 
         if context.focusedAgent == .codex, context.codexRunning {
-            if forceRealtime || now.timeIntervalSince(lastRealtimePollAt) >= 0.3 {
+            if now.timeIntervalSince(lastRealtimePollAt) >= 0.3 {
                 lastRealtimePollAt = now
                 nextSnapshot.realtimeActivity = realtimeActivityReader.readActive(now: now)
             }

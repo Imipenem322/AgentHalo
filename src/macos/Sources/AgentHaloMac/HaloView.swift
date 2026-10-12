@@ -224,6 +224,9 @@ final class HaloView: NSView {
         _ aggregate: AggregateSnapshot,
         errorPresentation: ErrorPresentation
     ) {
+        guard self.aggregate != aggregate || liveErrorPresentation != errorPresentation else {
+            return
+        }
         liveErrorPresentation = errorPresentation
         self.aggregate = aggregate
     }

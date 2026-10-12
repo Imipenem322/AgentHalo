@@ -30,6 +30,7 @@ namespace CodexHalo
 public sealed class SessionTracker
     {
         private readonly JavaScriptSerializer serializer;
+        private readonly Decoder decoder;
         private long offset;
         private string pending;
         private DateTime observedWriteUtc;
@@ -54,22 +55,10 @@ public sealed class SessionTracker
             FilePath = path;
             serializer = new JavaScriptSerializer();
             serializer.MaxJsonLength = Int32.MaxValue;
-            pending = String.Empty;
+            decoder = Encoding.UTF8.GetDecoder();
             activeToolIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            Snapshot = new SessionSnapshot();
-            Snapshot.ThreadId = ExtractThreadId(path);
-            Snapshot.ProjectName = "Codex";
-            Snapshot.WorkingDirectory = String.Empty;
-            Snapshot.State = HaloState.Idle;
-            Snapshot.Action = "Ready";
-            Snapshot.LastEventUtc = File.GetLastWriteTimeUtc(path);
-            Snapshot.Agent = AgentKind.Codex;
-            Snapshot.TurnPhase = AgentTurnPhase.None;
-            Snapshot.Activity = AgentActivityKind.None;
-            Snapshot.EvidenceSource = AgentEvidenceSource.SessionJsonl;
-            ReadMetadata();
-            ReadInitialTail();
-            observedWriteUtc = File.GetLastWriteTimeUtc(path);
+            ResetState();
+            InitializeFromFile(false);
         }
 
         private static string ExtractThreadId(string path)
@@ -87,13 +76,13 @@ public sealed class SessionTracker
             return name;
         }
 
-        private void ReadMetadata()
+        private void ReadMetadata(FileStream stream)
         {
             try
             {
-                using (FileStream stream = new FileStream(FilePath, FileMode.Open, FileAccess.Read,
-                    FileShare.ReadWrite | FileShare.Delete))
-                using (StreamReader reader = new StreamReader(stream, Encoding.UTF8, true, 4096, true))
+                stream.Seek(0, SeekOrigin.Begin);
+                using (StreamReader reader = new StreamReader(stream, Encoding.UTF8,
+                    true, 4096, true))
                 {
                     string line = reader.ReadLine();
                     if (!String.IsNullOrEmpty(line))
@@ -108,25 +97,21 @@ public sealed class SessionTracker
             }
         }
 
-        private void ReadInitialTail()
+        private void ReadInitialTail(FileStream stream)
         {
             try
             {
-                using (FileStream stream = new FileStream(FilePath, FileMode.Open, FileAccess.Read,
-                    FileShare.ReadWrite | FileShare.Delete))
+                long start = Math.Max(0, stream.Length - (384 * 1024));
+                stream.Seek(start, SeekOrigin.Begin);
+                if (start > 0)
                 {
-                    long start = Math.Max(0, stream.Length - (384 * 1024));
-                    stream.Seek(start, SeekOrigin.Begin);
-                    if (start > 0)
+                    int value;
+                    while ((value = stream.ReadByte()) >= 0 && value != '\n')
                     {
-                        int value;
-                        while ((value = stream.ReadByte()) >= 0 && value != '\n')
-                        {
-                        }
                     }
-                    ReadAvailable(stream);
-                    offset = stream.Position;
                 }
+                ReadAvailable(stream);
+                offset = stream.Position;
             }
             catch (Exception ex)
             {
@@ -142,8 +127,26 @@ public sealed class SessionTracker
             try
             {
                 FileInfo info = new FileInfo(FilePath);
+                info.Refresh();
+                if (!info.Exists)
+                {
+                    return false;
+                }
                 DateTime writeUtc = info.LastWriteTimeUtc;
-                if (writeUtc <= observedWriteUtc && info.Length == offset)
+                long length = info.Length;
+                bool replaced = length < offset ||
+                    (length == offset && writeUtc != observedWriteUtc);
+                if (replaced)
+                {
+                    if (!RebuildFromFile())
+                    {
+                        return false;
+                    }
+                    return previousTicks != Snapshot.LastEventUtc.Ticks ||
+                        previousState != Snapshot.State ||
+                        previousAction != Snapshot.Action;
+                }
+                if (writeUtc == observedWriteUtc && length == offset)
                 {
                     return previousState != Snapshot.State ||
                         previousAction != Snapshot.Action;
@@ -153,8 +156,10 @@ public sealed class SessionTracker
                 {
                     if (stream.Length < offset)
                     {
-                        offset = 0;
-                        pending = String.Empty;
+                        RebuildFromStream(stream, writeUtc);
+                        return previousTicks != Snapshot.LastEventUtc.Ticks ||
+                            previousState != Snapshot.State ||
+                            previousAction != Snapshot.Action;
                     }
                     if (stream.Length > offset)
                     {
@@ -188,36 +193,135 @@ public sealed class SessionTracker
             {
                 return;
             }
-            byte[] bytes = new byte[(int)Math.Min(remaining, Int32.MaxValue)];
-            int total = 0;
-            while (total < bytes.Length)
+            int bufferSize = (int)Math.Min(64 * 1024, remaining);
+            byte[] bytes = new byte[bufferSize];
+            char[] characters = new char[Encoding.UTF8.GetMaxCharCount(bufferSize)];
+            while (remaining > 0)
             {
-                int read = stream.Read(bytes, total, bytes.Length - total);
+                int requested = (int)Math.Min(remaining, bytes.Length);
+                int read = stream.Read(bytes, 0, requested);
                 if (read <= 0)
                 {
                     break;
                 }
-                total += read;
+                int charCount = decoder.GetChars(bytes, 0, read, characters, 0, false);
+                AppendDecodedText(characters, charCount);
+                remaining -= read;
             }
-            string text = pending + Encoding.UTF8.GetString(bytes, 0, total);
-            string[] lines = text.Split('\n');
-            int complete = lines.Length;
-            if (!text.EndsWith("\n", StringComparison.Ordinal))
+        }
+
+        private void AppendDecodedText(char[] characters, int charCount)
+        {
+            if (charCount == 0)
             {
-                pending = lines[lines.Length - 1];
-                complete--;
+                return;
             }
-            else
+            string text = pending + new string(characters, 0, charCount);
+            int lineStart = 0;
+            for (int index = 0; index < text.Length; index++)
             {
-                pending = String.Empty;
-            }
-            for (int i = 0; i < complete; i++)
-            {
-                string line = lines[i].TrimEnd('\r');
+                if (text[index] != '\n')
+                {
+                    continue;
+                }
+                string line = text.Substring(lineStart, index - lineStart)
+                    .TrimEnd('\r');
                 if (!String.IsNullOrEmpty(line))
                 {
                     ParseLine(line);
                 }
+                lineStart = index + 1;
+            }
+            pending = lineStart == text.Length
+                ? String.Empty : text.Substring(lineStart);
+        }
+
+        private void ResetState()
+        {
+            ResetState(File.GetLastWriteTimeUtc(FilePath));
+        }
+
+        private void ResetState(DateTime fallbackWriteUtc)
+        {
+            offset = 0;
+            pending = String.Empty;
+            decoder.Reset();
+            observedWriteUtc = DateTime.MinValue;
+            activeToolIds.Clear();
+            anonymousActiveTools = 0;
+            currentTurnIsPlanMode = false;
+            planProposalSeen = false;
+            hasTotalUsage = false;
+            turnUsageBaselineKnown = false;
+            totalInputTokens = 0;
+            totalCachedInputTokens = 0;
+            totalOutputTokens = 0;
+            turnBaselineInputTokens = 0;
+            turnBaselineCachedInputTokens = 0;
+            turnBaselineOutputTokens = 0;
+
+            Snapshot = new SessionSnapshot();
+            Snapshot.ThreadId = ExtractThreadId(FilePath);
+            Snapshot.ProjectName = "Codex";
+            Snapshot.WorkingDirectory = String.Empty;
+            Snapshot.State = HaloState.Idle;
+            Snapshot.Action = "Ready";
+            Snapshot.LastEventUtc = fallbackWriteUtc;
+            Snapshot.Agent = AgentKind.Codex;
+            Snapshot.TurnPhase = AgentTurnPhase.None;
+            Snapshot.Activity = AgentActivityKind.None;
+            Snapshot.EvidenceSource = AgentEvidenceSource.SessionJsonl;
+        }
+
+        private bool RebuildFromFile()
+        {
+            return InitializeFromFile(true);
+        }
+
+        private void RebuildFromStream(FileStream stream, DateTime writeUtc)
+        {
+            ResetState(writeUtc);
+            ReadMetadata(stream);
+            ReadInitialTail(stream);
+            observedWriteUtc = writeUtc;
+        }
+
+        private bool InitializeFromFile(bool resetState)
+        {
+            try
+            {
+                FileInfo info = new FileInfo(FilePath);
+                info.Refresh();
+                if (!info.Exists)
+                {
+                    return false;
+                }
+                DateTime writeUtc = info.LastWriteTimeUtc;
+                using (FileStream stream = new FileStream(FilePath, FileMode.Open,
+                    FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+                {
+                    if (resetState)
+                    {
+                        ResetState(writeUtc);
+                    }
+                    else
+                    {
+                        Snapshot.LastEventUtc = writeUtc;
+                    }
+                    ReadMetadata(stream);
+                    ReadInitialTail(stream);
+                    observedWriteUtc = writeUtc;
+                    return true;
+                }
+            }
+            catch (IOException)
+            {
+                return false;
+            }
+            catch (Exception ex)
+            {
+                SettingsStorage.Log("Session initialization failed: " + ex.Message);
+                return false;
             }
         }
 
@@ -812,6 +916,7 @@ public sealed class CodexSessionMonitor : IDisposable
         private readonly string root;
         private readonly Dictionary<string, SessionTracker> trackers;
         private readonly CodexRealtimeActivityReader realtimeActivity;
+        private readonly CodexSQLiteLogStore sqliteLogStore;
         private readonly bool realtimeEnabled;
         private readonly HashSet<string> pendingSessionPaths;
         private readonly System.Threading.Timer timer;
@@ -822,6 +927,8 @@ public sealed class CodexSessionMonitor : IDisposable
         private HaloState realtimeState;
         private string realtimeAction;
         private bool hasRealtimeActivity;
+        private bool codexRunning;
+        private bool processStateKnown;
         private bool started;
         private int pollInProgress;
         private FileSystemWatcher sessionWatcher;
@@ -829,17 +936,32 @@ public sealed class CodexSessionMonitor : IDisposable
         public event EventHandler Changed;
 
         public CodexSessionMonitor()
-            : this(Path.Combine(Environment.GetFolderPath(
-                Environment.SpecialFolder.UserProfile), ".codex", "sessions"), true)
+            : this(AgentHaloPaths.CodexDataRootDirectory())
+        {
+        }
+
+        internal CodexSessionMonitor(string codexDataRoot)
+            : this(codexDataRoot, true, true)
         {
         }
 
         internal CodexSessionMonitor(string sessionsRoot, bool enableRealtime)
+            : this(sessionsRoot, enableRealtime, false)
         {
-            root = sessionsRoot;
+        }
+
+        private CodexSessionMonitor(string rootPath, bool enableRealtime,
+            bool rootPathIsCodexHome)
+        {
+            string codexDataRoot = rootPathIsCodexHome
+                ? rootPath : AgentHaloPaths.CodexDataRootDirectory();
+            root = rootPathIsCodexHome
+                ? Path.Combine(rootPath, "sessions") : rootPath;
             realtimeEnabled = enableRealtime;
             trackers = new Dictionary<string, SessionTracker>(StringComparer.OrdinalIgnoreCase);
-            realtimeActivity = new CodexRealtimeActivityReader();
+            sqliteLogStore = new CodexSQLiteLogStore(Path.Combine(
+                codexDataRoot, "logs_2.sqlite"));
+            realtimeActivity = new CodexRealtimeActivityReader(sqliteLogStore);
             pendingSessionPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             realtimeAction = String.Empty;
             dispatcher = Dispatcher.CurrentDispatcher;
@@ -873,6 +995,30 @@ public sealed class CodexSessionMonitor : IDisposable
             }
         }
 
+        internal void SetCodexRunning(bool isRunning)
+        {
+            lock (sync)
+            {
+                if (processStateKnown && codexRunning == isRunning)
+                {
+                    return;
+                }
+                processStateKnown = true;
+                codexRunning = isRunning;
+                if (isRunning)
+                {
+                    nextRealtimePollUtc = DateTime.MinValue;
+                }
+                else
+                {
+                    nextRealtimePollUtc = DateTime.MaxValue;
+                    hasRealtimeActivity = false;
+                    realtimeState = HaloState.Idle;
+                    realtimeAction = String.Empty;
+                }
+            }
+        }
+
         private void OnTick(object state)
         {
             if (Interlocked.Exchange(ref pollInProgress, 1) != 0)
@@ -899,12 +1045,13 @@ public sealed class CodexSessionMonitor : IDisposable
                     }
                     foreach (SessionTracker tracker in trackers.Values.ToList())
                     {
-                        if (File.Exists(tracker.FilePath) && tracker.Refresh())
+                        if (tracker.Refresh())
                         {
                             changed = true;
                         }
                     }
-                    if (realtimeEnabled && DateTime.UtcNow >= nextRealtimePollUtc)
+                    if (realtimeEnabled && (!processStateKnown || codexRunning) &&
+                        DateTime.UtcNow >= nextRealtimePollUtc)
                     {
                         nextRealtimePollUtc = DateTime.UtcNow.AddMilliseconds(300);
                         HaloState activeState;
@@ -928,18 +1075,23 @@ public sealed class CodexSessionMonitor : IDisposable
             {
                 Interlocked.Exchange(ref pollInProgress, 0);
             }
-            if (changed && Changed != null)
+            if (changed)
             {
-                dispatcher.BeginInvoke(DispatcherPriority.Background,
-                    new Action(delegate
-                    {
-                        EventHandler handler = Changed;
-                        if (handler != null)
-                        {
-                            handler(this, EventArgs.Empty);
-                        }
-                    }));
+                NotifyChanged();
             }
+        }
+
+        private void NotifyChanged()
+        {
+            dispatcher.BeginInvoke(DispatcherPriority.Background,
+                new Action(delegate
+                {
+                    EventHandler handler = Changed;
+                    if (handler != null)
+                    {
+                        handler(this, EventArgs.Empty);
+                    }
+                }));
         }
 
         private bool Discover()
@@ -1011,7 +1163,13 @@ public sealed class CodexSessionMonitor : IDisposable
                 sessionWatcher.Created += OnSessionFileChanged;
                 sessionWatcher.Changed += OnSessionFileChanged;
                 sessionWatcher.Renamed += delegate(object sender,
-                    RenamedEventArgs args) { QueueSessionPath(args.FullPath); };
+                    RenamedEventArgs args)
+                {
+                    RateLimitReader.InvalidateCachedPath(args.OldFullPath);
+                    QueueSessionPath(args.OldFullPath);
+                    OnSessionFileChanged(sender, args);
+                };
+                sessionWatcher.Deleted += OnSessionFileChanged;
                 sessionWatcher.EnableRaisingEvents = true;
             }
             catch (Exception ex)
@@ -1027,6 +1185,7 @@ public sealed class CodexSessionMonitor : IDisposable
 
         private void OnSessionFileChanged(object sender, FileSystemEventArgs args)
         {
+            RateLimitReader.InvalidateCachedPath(args.FullPath);
             QueueSessionPath(args.FullPath);
         }
 
@@ -1185,6 +1344,7 @@ public sealed class CodexSessionMonitor : IDisposable
                 return codexRunning && snapshot.LastEventUtc >= now.AddMinutes(-10);
             }
             return snapshot.State == HaloState.Error &&
+                snapshot.LastEventUtc > settings.GetAcknowledgedErrorUtc(snapshot.Agent) &&
                 snapshot.LastEventUtc >= now.AddHours(-12);
         }
 
@@ -1330,15 +1490,23 @@ public sealed class CodexSessionMonitor : IDisposable
                 watcher.EnableRaisingEvents = false;
                 watcher.Dispose();
             }
+            sqliteLogStore.Dispose();
         }
     }
 
 public sealed class CodexRealtimeActivityReader
     {
         private readonly JavaScriptSerializer serializer;
+        private readonly CodexSQLiteLogStore logStore;
 
         public CodexRealtimeActivityReader()
+            : this(CodexSQLiteLogStore.Shared)
         {
+        }
+
+        internal CodexRealtimeActivityReader(CodexSQLiteLogStore logStore)
+        {
+            this.logStore = logStore;
             serializer = new JavaScriptSerializer();
             serializer.MaxJsonLength = Int32.MaxValue;
         }
@@ -1353,7 +1521,11 @@ public sealed class CodexRealtimeActivityReader
                 " and target='codex_api::sse::responses' and " +
                 "feedback_log_body like 'SSE event: {\"type\":\"response.%' " +
                 "order by id desc limit 96;";
-            List<string> rows = CodexSQLiteLogStore.Shared.QueryText(query);
+            List<string> rows;
+            if (!logStore.TryQueryText(query, out rows))
+            {
+                return false;
+            }
             return FindActive(rows, out state, out action);
         }
 
@@ -1614,6 +1786,13 @@ public static class CodexFailureReader
     {
         public static bool TryReadRecent(out string detail, out DateTime eventUtc)
         {
+            return TryReadRecent(AgentHaloPaths.CodexDataRootDirectory(),
+                out detail, out eventUtc);
+        }
+
+        internal static bool TryReadRecent(string codexDataRoot,
+            out string detail, out DateTime eventUtc)
+        {
             detail = null;
             eventUtc = DateTime.MinValue;
             long cutoff = DateTimeOffset.UtcNow.AddMinutes(-2).ToUnixTimeSeconds();
@@ -1624,19 +1803,49 @@ public static class CodexFailureReader
                 "lower(target) like '%client%' or lower(target) like '%auth%' or " +
                 "lower(target) like '%response%' or lower(target) like '%session%') " +
                 "order by id desc limit 24;";
-            foreach (string line in CodexSQLiteLogStore.Shared.QueryText(query))
+            CodexSQLiteLogStore store = CodexSQLiteLogStore.Shared;
+            bool ownsStore = false;
+            try
             {
-                int tab = line.IndexOf('\t');
-                if (tab <= 0) continue;
-                long seconds;
-                if (!long.TryParse(line.Substring(0, tab), out seconds)) continue;
-                if (seconds < -62135596800L || seconds > 253402300799L) continue;
-                string matched = GeneratedHaloSpec.ClassifyFailure(
-                    line.Substring(tab + 1));
-                if (matched == null) continue;
-                detail = L10n.Instance[matched];
-                eventUtc = DateTimeOffset.FromUnixTimeSeconds(seconds).UtcDateTime;
-                return true;
+                string databasePath = Path.GetFullPath(Path.Combine(
+                    codexDataRoot, "logs_2.sqlite"));
+                if (!String.Equals(databasePath,
+                    Path.GetFullPath(store.DatabasePath),
+                    StringComparison.OrdinalIgnoreCase))
+                {
+                    store = new CodexSQLiteLogStore(databasePath);
+                    ownsStore = true;
+                }
+                List<string> rows;
+                if (!store.TryQueryText(query, out rows))
+                {
+                    return false;
+                }
+                foreach (string line in rows)
+                {
+                    int tab = line.IndexOf('\t');
+                    if (tab <= 0) continue;
+                    long seconds;
+                    if (!long.TryParse(line.Substring(0, tab), out seconds)) continue;
+                    if (seconds < -62135596800L || seconds > 253402300799L) continue;
+                    string matched = GeneratedHaloSpec.ClassifyFailure(
+                        line.Substring(tab + 1));
+                    if (matched == null) continue;
+                    detail = L10n.Instance[matched];
+                    eventUtc = DateTimeOffset.FromUnixTimeSeconds(seconds).UtcDateTime;
+                    return true;
+                }
+            }
+            catch
+            {
+                return false;
+            }
+            finally
+            {
+                if (ownsStore)
+                {
+                    store.Dispose();
+                }
             }
             return false;
         }
@@ -1644,6 +1853,22 @@ public static class CodexFailureReader
 
 public static class RateLimitReader
     {
+        private sealed class CandidateFile
+        {
+            public string Path;
+            public long Length;
+            public DateTime LastWriteUtc;
+        }
+
+        private static readonly object cacheSync = new object();
+        private static string cachedRoot;
+        private static string cachedSignature;
+        private static string[] cachedPaths;
+        private static UsageMetrics cachedMetrics;
+        private static bool cachedHasMetrics;
+        private static bool cacheValid;
+        private static long cacheRevision;
+
         public static bool TryRead(out double fiveHourUsed, out double weeklyUsed)
         {
             UsageMetrics metrics;
@@ -1685,52 +1910,122 @@ public static class RateLimitReader
         // false structured quota records.
         public static bool TryRead(out UsageMetrics metrics)
         {
+            bool scanSucceeded;
+            return TryRead(AgentHaloPaths.CodexDataRootDirectory(), out metrics,
+                out scanSucceeded);
+        }
+
+        internal static bool TryRead(string codexDataRoot,
+            out UsageMetrics metrics, out bool scanSucceeded)
+        {
             metrics = new UsageMetrics
             {
                 ContextInputTokens = -1
             };
-            try
+            scanSucceeded = false;
+            long scanRevision;
+            lock (cacheSync)
             {
-                string codexRoot = Path.Combine(Environment.GetFolderPath(
-                    Environment.SpecialFolder.UserProfile), ".codex");
-                string[] roots =
+                scanRevision = cacheRevision;
+            }
+            string rootPath;
+            List<CandidateFile> candidates;
+            string signature;
+            if (!TryGetCandidates(codexDataRoot, out rootPath, out candidates,
+                out signature, out scanSucceeded))
+            {
+                return false;
+            }
+
+            UsageMetrics priorMetrics = null;
+            bool priorHasMetrics = false;
+            lock (cacheSync)
+            {
+                if (scanRevision == cacheRevision && scanSucceeded && cacheValid &&
+                    String.Equals(cachedRoot, rootPath,
+                    StringComparison.OrdinalIgnoreCase) &&
+                    String.Equals(cachedSignature, signature,
+                        StringComparison.Ordinal))
                 {
-                    Path.Combine(codexRoot, "sessions"),
-                    Path.Combine(codexRoot, "archived_sessions")
-                };
-                IEnumerable<string> files = roots.Where(Directory.Exists)
-                    .SelectMany(delegate(string root)
-                    {
-                        return Directory.GetFiles(root, "*.jsonl", SearchOption.AllDirectories);
-                    })
-                    .OrderByDescending(File.GetLastWriteTimeUtc)
-                    .Take(GeneratedHaloSpec.RateLimitRecentFileCount);
-                JavaScriptSerializer serializer = new JavaScriptSerializer();
-                serializer.MaxJsonLength = Int32.MaxValue;
-                foreach (string path in files)
+                    metrics = CloneMetrics(cachedMetrics);
+                    scanSucceeded = true;
+                    return cachedHasMetrics;
+                }
+                if (String.Equals(cachedRoot, rootPath,
+                    StringComparison.OrdinalIgnoreCase) && cachedMetrics != null)
                 {
-                    string[] lines = ReadTailLines(path);
-                    for (int index = lines.Length - 1; index >= Math.Max(0,
-                        lines.Length - GeneratedHaloSpec.RateLimitRecentLineCount);
-                        index--)
+                    priorMetrics = CloneMetrics(cachedMetrics);
+                    priorHasMetrics = cachedHasMetrics;
+                }
+            }
+
+            UsageMetrics parsed = new UsageMetrics
+            {
+                ContextInputTokens = -1
+            };
+            JavaScriptSerializer serializer = new JavaScriptSerializer();
+            serializer.MaxJsonLength = Int32.MaxValue;
+            foreach (CandidateFile candidate in candidates)
+            {
+                string[] lines;
+                try
+                {
+                    lines = ReadTailLines(candidate.Path);
+                }
+                catch
+                {
+                    scanSucceeded = false;
+                    continue;
+                }
+                for (int index = lines.Length - 1; index >= Math.Max(0,
+                    lines.Length - GeneratedHaloSpec.RateLimitRecentLineCount);
+                    index--)
+                {
+                    string line = lines[index];
+                    if (!line.Contains(GeneratedHaloSpec.RateLimitMarker))
                     {
-                        if (!lines[index].Contains(GeneratedHaloSpec.RateLimitMarker))
+                        continue;
+                    }
+                    try
+                    {
+                        ApplyRateLimitLine(line, parsed, serializer);
+                    }
+                    catch
+                    {
+                        scanSucceeded = false;
+                    }
+                    if (HasCompleteMetrics(parsed))
+                    {
+                        bool hasMetrics = HasAnyMetrics(parsed);
+                        metrics = parsed;
+                        if (scanSucceeded)
                         {
-                            continue;
+                            scanSucceeded = CacheResult(rootPath, signature,
+                                candidates, parsed, hasMetrics, scanRevision);
                         }
-                        ApplyRateLimitLine(lines[index], metrics, serializer);
-                        if (HasCompleteMetrics(metrics))
+                        if (!scanSucceeded && priorMetrics != null)
                         {
-                            return true;
+                            metrics = priorMetrics;
+                            return priorHasMetrics;
                         }
+                        return hasMetrics;
                     }
                 }
             }
-            catch
+
+            bool foundMetrics = HasAnyMetrics(parsed);
+            if (scanSucceeded)
             {
+                scanSucceeded = CacheResult(rootPath, signature, candidates,
+                    parsed, foundMetrics, scanRevision);
             }
-            return metrics.HasFiveHour || metrics.HasWeekly || metrics.HasMonthly ||
-                metrics.HasContext;
+            if (!scanSucceeded && priorMetrics != null)
+            {
+                metrics = priorMetrics;
+                return priorHasMetrics;
+            }
+            metrics = parsed;
+            return foundMetrics;
         }
 
         internal static bool TryReadFromNewestLinesForTest(
@@ -1749,12 +2044,221 @@ public static class RateLimitReader
                 {
                     continue;
                 }
-                ApplyRateLimitLine(line, metrics, serializer);
+                try
+                {
+                    ApplyRateLimitLine(line, metrics, serializer);
+                }
+                catch
+                {
+                    continue;
+                }
                 if (HasCompleteMetrics(metrics))
                 {
                     return true;
                 }
             }
+            return metrics.HasFiveHour || metrics.HasWeekly || metrics.HasMonthly ||
+                metrics.HasContext;
+        }
+
+        internal static void InvalidateCachedPath(string path)
+        {
+            if (String.IsNullOrWhiteSpace(path) ||
+                !path.EndsWith(".jsonl", StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+            string fullPath;
+            try
+            {
+                fullPath = Path.GetFullPath(path);
+            }
+            catch
+            {
+                return;
+            }
+            lock (cacheSync)
+            {
+                cacheRevision++;
+                if (cachedPaths != null && cachedPaths.Any(delegate(string candidate)
+                    {
+                        return String.Equals(candidate, fullPath,
+                            StringComparison.OrdinalIgnoreCase);
+                    }))
+                {
+                    cacheValid = false;
+                }
+            }
+        }
+
+        internal static void ClearCache(string codexDataRoot)
+        {
+            string rootPath = null;
+            try
+            {
+                if (!String.IsNullOrWhiteSpace(codexDataRoot))
+                {
+                    rootPath = Path.GetFullPath(codexDataRoot);
+                }
+            }
+            catch
+            {
+            }
+
+            lock (cacheSync)
+            {
+                cacheRevision++;
+                if (rootPath != null && cachedRoot != null &&
+                    !String.Equals(cachedRoot, rootPath,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    return;
+                }
+                cachedRoot = null;
+                cachedSignature = null;
+                cachedPaths = null;
+                cachedMetrics = null;
+                cachedHasMetrics = false;
+                cacheValid = false;
+            }
+        }
+
+        private static bool TryGetCandidates(string codexDataRoot,
+            out string rootPath, out List<CandidateFile> candidates,
+            out string signature, out bool scanSucceeded)
+        {
+            rootPath = null;
+            signature = String.Empty;
+            candidates = new List<CandidateFile>();
+            scanSucceeded = true;
+            try
+            {
+                rootPath = Path.GetFullPath(codexDataRoot);
+                List<CandidateFile> all = new List<CandidateFile>();
+                string[] roots =
+                {
+                    Path.Combine(rootPath, "sessions"),
+                    Path.Combine(rootPath, "archived_sessions")
+                };
+                foreach (string root in roots)
+                {
+                    string[] paths;
+                    try
+                    {
+                        paths = Directory.GetFiles(root, "*.jsonl",
+                            SearchOption.AllDirectories);
+                    }
+                    catch (DirectoryNotFoundException)
+                    {
+                        continue;
+                    }
+                    catch (FileNotFoundException)
+                    {
+                        continue;
+                    }
+                    catch
+                    {
+                        scanSucceeded = false;
+                        continue;
+                    }
+                    foreach (string path in paths)
+                    {
+                        try
+                        {
+                            FileInfo info = new FileInfo(path);
+                            info.Refresh();
+                            if (!info.Exists)
+                            {
+                                scanSucceeded = false;
+                                continue;
+                            }
+                            all.Add(new CandidateFile
+                            {
+                                Path = Path.GetFullPath(path),
+                                Length = info.Length,
+                                LastWriteUtc = info.LastWriteTimeUtc
+                            });
+                        }
+                        catch
+                        {
+                            scanSucceeded = false;
+                        }
+                    }
+                }
+                candidates = all
+                    .OrderByDescending(delegate(CandidateFile candidate)
+                    {
+                        return candidate.LastWriteUtc;
+                    })
+                    .Take(GeneratedHaloSpec.RateLimitRecentFileCount)
+                    .ToList();
+
+                StringBuilder signatureBuilder = new StringBuilder();
+                foreach (CandidateFile candidate in candidates)
+                {
+                    signatureBuilder.Append(candidate.Path.Length)
+                        .Append(':').Append(candidate.Path)
+                        .Append('|').Append(candidate.Length)
+                        .Append('|').Append(candidate.LastWriteUtc.Ticks)
+                        .Append('\n');
+                }
+                signature = signatureBuilder.ToString();
+                return true;
+            }
+            catch
+            {
+                scanSucceeded = false;
+                return false;
+            }
+        }
+
+        private static bool CacheResult(string rootPath, string signature,
+            IList<CandidateFile> candidates, UsageMetrics metrics,
+            bool hasMetrics, long expectedRevision)
+        {
+            lock (cacheSync)
+            {
+                if (cacheRevision != expectedRevision)
+                {
+                    return false;
+                }
+                cachedRoot = rootPath;
+                cachedSignature = signature;
+                cachedPaths = candidates.Select(delegate(CandidateFile candidate)
+                {
+                    return candidate.Path;
+                }).ToArray();
+                cachedMetrics = CloneMetrics(metrics);
+                cachedHasMetrics = hasMetrics;
+                cacheValid = true;
+                return true;
+            }
+        }
+
+        private static UsageMetrics CloneMetrics(UsageMetrics metrics)
+        {
+            if (metrics == null)
+            {
+                return null;
+            }
+            return new UsageMetrics
+            {
+                HasFiveHour = metrics.HasFiveHour,
+                HasWeekly = metrics.HasWeekly,
+                HasMonthly = metrics.HasMonthly,
+                FiveHourUsedPercent = metrics.FiveHourUsedPercent,
+                WeeklyUsedPercent = metrics.WeeklyUsedPercent,
+                MonthlyUsedPercent = metrics.MonthlyUsedPercent,
+                FiveHourResetUtc = metrics.FiveHourResetUtc,
+                WeeklyResetUtc = metrics.WeeklyResetUtc,
+                MonthlyResetUtc = metrics.MonthlyResetUtc,
+                ContextInputTokens = metrics.ContextInputTokens,
+                ContextWindowTokens = metrics.ContextWindowTokens
+            };
+        }
+
+        private static bool HasAnyMetrics(UsageMetrics metrics)
+        {
             return metrics.HasFiveHour || metrics.HasWeekly || metrics.HasMonthly ||
                 metrics.HasContext;
         }
@@ -2027,7 +2531,16 @@ public static class RateLimitReader
                     string text = reader.ReadToEnd();
                     string[] lines = text.Split(new[] { '\r', '\n' },
                         StringSplitOptions.RemoveEmptyEntries);
-                    return start > 0 && lines.Length > 1 ? lines.Skip(1).ToArray() : lines;
+                    if (start > 0 && lines.Length > 0)
+                    {
+                        lines = lines.Skip(1).ToArray();
+                    }
+                    if (text.Length > 0 && text[text.Length - 1] != '\r' &&
+                        text[text.Length - 1] != '\n' && lines.Length > 0)
+                    {
+                        Array.Resize(ref lines, lines.Length - 1);
+                    }
+                    return lines;
                 }
             }
         }

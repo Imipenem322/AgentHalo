@@ -130,18 +130,10 @@ public struct CodexAuthStore: Sendable {
     }
 
     private func authPaths() -> [String] {
-        if let codexHome = environment.value(for: "CODEX_HOME")?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-           !codexHome.isEmpty {
-            return [Self.join(codexHome, "auth.json")]
-        }
-
-        let home = environment.value(for: "HOME")?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return [
-            Self.join(home, ".config/codex/auth.json"),
-            Self.join(home, ".codex/auth.json"),
-        ]
+        CodexPaths.authFilePaths(
+            codexHome: environment.value(for: "CODEX_HOME"),
+            homeDirectory: environment.value(for: "HOME") ?? ""
+        )
     }
 
     private func readPayload(
@@ -243,10 +235,6 @@ public struct CodexAuthStore: Sendable {
         return ISO8601DateFormatter().date(from: value)
     }
 
-    private static func join(_ base: String, _ suffix: String) -> String {
-        let trimmed = base.replacingOccurrences(of: #"/+$"#, with: "", options: .regularExpression)
-        return trimmed.isEmpty ? "/\(suffix)" : "\(trimmed)/\(suffix)"
-    }
 }
 
 private extension UsageDigest {

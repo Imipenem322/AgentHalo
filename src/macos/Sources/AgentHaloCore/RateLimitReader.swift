@@ -6,8 +6,8 @@ public struct RateLimitReader: @unchecked Sendable {
 
     public init(
         roots: [URL] = [
-            FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex/sessions", isDirectory: true),
-            FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex/archived_sessions", isDirectory: true)
+            CodexPaths.dataRoot.appendingPathComponent("sessions", isDirectory: true),
+            CodexPaths.dataRoot.appendingPathComponent("archived_sessions", isDirectory: true)
         ],
         fileManager: FileManager = .default
     ) {

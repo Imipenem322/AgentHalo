@@ -11,8 +11,7 @@ public final class CodexSessionMonitor {
     private let fileManager: FileManager
 
     public init(
-        sessionsRoot: URL = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".codex", isDirectory: true)
+        sessionsRoot: URL = CodexPaths.dataRoot
             .appendingPathComponent("sessions", isDirectory: true),
         sessionTitleReader: CodexSessionTitleReader = CodexSessionTitleReader(),
         fileManager: FileManager = .default

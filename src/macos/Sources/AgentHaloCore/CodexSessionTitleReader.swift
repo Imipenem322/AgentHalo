@@ -7,8 +7,7 @@ public struct CodexSessionTitleReader: Sendable {
     private var cachedTitles: [String: String] = [:]
 
     public init(
-        indexURL: URL = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".codex", isDirectory: true)
+        indexURL: URL = CodexPaths.dataRoot
             .appendingPathComponent("session_index.jsonl")
     ) {
         self.indexURL = indexURL

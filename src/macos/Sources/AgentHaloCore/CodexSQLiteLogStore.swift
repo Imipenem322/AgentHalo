@@ -5,13 +5,13 @@ public struct CodexSQLiteLogStore: Sendable {
     public enum StoreError: Error {
         case openFailed(Int32)
         case prepareFailed(Int32)
+        case stepFailed(Int32)
     }
 
     public var databaseURL: URL
 
     public init(
-        databaseURL: URL = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".codex", isDirectory: true)
+        databaseURL: URL = CodexPaths.dataRoot
             .appendingPathComponent("logs_2.sqlite")
     ) {
         self.databaseURL = databaseURL
@@ -54,7 +54,14 @@ public struct CodexSQLiteLogStore: Sendable {
         }
 
         var rows: [String] = []
-        while sqlite3_step(statement) == SQLITE_ROW {
+        while true {
+            let step = sqlite3_step(statement)
+            if step == SQLITE_DONE {
+                return rows
+            }
+            guard step == SQLITE_ROW else {
+                throw StoreError.stepFailed(step)
+            }
             guard let pointer = sqlite3_column_text(statement, 0) else {
                 continue
             }
@@ -62,6 +69,5 @@ public struct CodexSQLiteLogStore: Sendable {
             let bytes = UnsafeBufferPointer(start: pointer, count: length)
             rows.append(String(decoding: bytes, as: UTF8.self))
         }
-        return rows
     }
 }

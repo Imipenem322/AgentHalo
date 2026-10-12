@@ -68,7 +68,11 @@ public sealed class HaloWindow : Window
         private IntPtr topmostGuardForeground;
         private DateTime nextTopmostGuardUtc = DateTime.MinValue;
         private DateTime activeErrorUtc;
+        private string activeErrorThreadId;
         private DateTime errorDimmedUtc;
+        private DateTime dimmedErrorUtc;
+        private string dimmedErrorThreadId;
+        private AgentKind dimmedErrorAgent;
         private DateTime nextRuntimeStateRefreshUtc = DateTime.MinValue;
         private DateTime nextDeepSeekSetupUtc = DateTime.MinValue;
         private string deepSeekSetupError;
@@ -247,6 +251,7 @@ public sealed class HaloWindow : Window
             displayAggregate = null;
             providerSnapshot = null;
             activeErrorUtc = DateTime.MinValue;
+            activeErrorThreadId = null;
             errorDimmedUtc = DateTime.MinValue;
             errorPresentation = ErrorPresentation.Flashing;
             codexWasForeground = coordinator.IsForeground(
@@ -290,9 +295,9 @@ public sealed class HaloWindow : Window
         }
 
         internal static bool ShouldRefreshRuntimeState(bool foregroundChanged,
-            bool errorIsDimmed, DateTime now, DateTime nextRefreshUtc)
+            bool errorDeadlineDue, DateTime now, DateTime nextRefreshUtc)
         {
-            return foregroundChanged || errorIsDimmed ||
+            return foregroundChanged || errorDeadlineDue ||
                 IsRuntimeStateRefreshDue(now, nextRefreshUtc);
         }
 
@@ -378,7 +383,10 @@ public sealed class HaloWindow : Window
                         if (!previouslyEnabled)
                             settings.EnabledAgents.Remove("deepseek-harness");
                     }
-                    details.SetEnabledAgentDescriptors(EnabledAgentDescriptors());
+                    if (details.IsVisible)
+                    {
+                        SyncDetails();
+                    }
                     BuildTrayMenu();
                 }
                 return;
@@ -417,11 +425,15 @@ public sealed class HaloWindow : Window
                 if (focusedAgentIsForeground)
                 {
                     errorPresentation = ErrorPresentation.Bright;
+                    errorDimmedUtc = DateTime.MinValue;
                 }
                 else if (codexWasForeground)
                 {
                     errorPresentation = ErrorPresentation.Dim;
-                    errorDimmedUtc = DateTime.UtcNow;
+                    errorDimmedUtc = now;
+                    dimmedErrorUtc = activeErrorUtc;
+                    dimmedErrorThreadId = activeErrorThreadId;
+                    dimmedErrorAgent = aggregate.FocusedAgent;
                 }
             }
             // Session files do not change when Codex exits, and a completed
@@ -429,7 +441,7 @@ public sealed class HaloWindow : Window
             // aggregate periodically so both transitions reach the halo.
             if (ShouldRefreshRuntimeState(
                     focusedAgentIsForeground != codexWasForeground,
-                    errorPresentation == ErrorPresentation.Dim,
+                    IsDimmedErrorDue(now, errorDimmedUtc),
                     now,
                     nextRuntimeStateRefreshUtc))
             {
@@ -529,11 +541,11 @@ public sealed class HaloWindow : Window
             DateTime nowUtc = DateTime.UtcNow;
             providerSnapshot = coordinator.Read(settings, nowUtc);
             aggregate = providerSnapshot.Aggregate;
-            bool codexRunning = aggregate.Presence != AgentPresenceState.Offline;
             nextRuntimeStateRefreshUtc = NextRuntimeStateRefreshUtc(nowUtc);
             if (aggregate.State == HaloState.Error)
             {
                 DateTime previousErrorUtc = activeErrorUtc;
+                string previousErrorThreadId = activeErrorThreadId;
                 SessionSnapshot latestError = aggregate.Sessions
                     .Where(delegate(SessionSnapshot session)
                     {
@@ -543,28 +555,21 @@ public sealed class HaloWindow : Window
                     {
                         return session.LastEventUtc;
                     }).FirstOrDefault();
-                activeErrorUtc = latestError == null ? DateTime.UtcNow : latestError.LastEventUtc;
+                activeErrorUtc = latestError == null ? nowUtc : latestError.LastEventUtc;
+                activeErrorThreadId = latestError == null ? null : latestError.ThreadId;
                 if (activeErrorUtc <= settings.GetAcknowledgedErrorUtc(
                         aggregate.FocusedAgent))
                 {
-                    if (aggregate.FocusedAgent == AgentKind.DeepSeekHarness)
-                    {
-                        errorPresentation = ErrorPresentation.Flashing;
-                        errorDimmedUtc = DateTime.MinValue;
-                        providerSnapshot = coordinator.Read(settings, nowUtc);
-                        aggregate = providerSnapshot.Aggregate;
-                        codexRunning = aggregate.Presence !=
-                            AgentPresenceState.Offline;
-                        nextRuntimeStateRefreshUtc =
-                            NextRuntimeStateRefreshUtc(nowUtc);
-                    }
-                    else
-                    {
-                        SetCodexIdlePresentation(aggregate, codexRunning);
-                    }
+                    errorDimmedUtc = DateTime.MinValue;
+                    errorPresentation = ErrorPresentation.Flashing;
+                    providerSnapshot = coordinator.Read(settings, nowUtc);
+                    aggregate = providerSnapshot.Aggregate;
                 }
-                else if (activeErrorUtc > previousErrorUtc)
+                else if (activeErrorUtc > previousErrorUtc ||
+                    !String.Equals(activeErrorThreadId, previousErrorThreadId,
+                        StringComparison.Ordinal))
                 {
+                    errorDimmedUtc = DateTime.MinValue;
                     errorPresentation = coordinator.IsForeground(
                         GetForegroundWindow())
                         ? ErrorPresentation.Bright : ErrorPresentation.Flashing;
@@ -572,33 +577,25 @@ public sealed class HaloWindow : Window
                 else if (coordinator.IsForeground(GetForegroundWindow()))
                 {
                     errorPresentation = ErrorPresentation.Bright;
+                    errorDimmedUtc = DateTime.MinValue;
                 }
                 else if (errorPresentation != ErrorPresentation.Dim)
                 {
                     errorPresentation = ErrorPresentation.Flashing;
                 }
             }
-            if (errorPresentation == ErrorPresentation.Dim &&
-                DateTime.UtcNow - errorDimmedUtc >= TimeSpan.FromMinutes(1))
+            if (!settings.Paused && IsDimmedErrorDue(nowUtc, errorDimmedUtc))
             {
-                settings.AcknowledgeError(aggregate.FocusedAgent,
-                    activeErrorUtc);
+                bool sameError = IsCurrentError(aggregate, dimmedErrorAgent,
+                    dimmedErrorThreadId, dimmedErrorUtc);
+                settings.AcknowledgeError(dimmedErrorAgent, dimmedErrorUtc);
                 SettingsStorage.Save(settings);
+                errorDimmedUtc = DateTime.MinValue;
                 errorPresentation = ErrorPresentation.Flashing;
-                if (aggregate.FocusedAgent == AgentKind.DeepSeekHarness)
+                if (sameError)
                 {
-                    errorDimmedUtc = DateTime.MinValue;
-                    DateTime rereadUtc = DateTime.UtcNow;
-                    providerSnapshot = coordinator.Read(settings, rereadUtc);
+                    providerSnapshot = coordinator.Read(settings, nowUtc);
                     aggregate = providerSnapshot.Aggregate;
-                    codexRunning = aggregate.Presence !=
-                        AgentPresenceState.Offline;
-                    nextRuntimeStateRefreshUtc =
-                        NextRuntimeStateRefreshUtc(rereadUtc);
-                }
-                else
-                {
-                    SetCodexIdlePresentation(aggregate, codexRunning);
                 }
             }
             if (demoState.HasValue)
@@ -617,8 +614,6 @@ public sealed class HaloWindow : Window
             providerSnapshot.Aggregate = aggregate;
             tray.Text = ("Agent Halo · " + aggregate.Label).Substring(0,
                 Math.Min(63, ("Agent Halo · " + aggregate.Label).Length));
-            details.SetEnabledAgentDescriptors(EnabledAgentDescriptors());
-            details.SetAgentSwitchingEnabled(!settings.Paused);
             if (!settings.Paused && deepSeekSetup != null &&
                 deepSeekSetup.Ready && aggregate.FocusedAgent ==
                     AgentKind.DeepSeekHarness &&
@@ -630,33 +625,37 @@ public sealed class HaloWindow : Window
                         ? "status.deepseek.connecting"
                         : "status.deepseek.start_or_restart";
             }
-            details.UpdateContent(providerSnapshot);
+            if (details.IsVisible)
+            {
+                SyncDetails();
+            }
         }
 
-        private static void SetCodexIdlePresentation(AggregateSnapshot snapshot,
-            bool codexRunning)
+        internal static bool IsDimmedErrorDue(DateTime nowUtc,
+            DateTime dimmedUtc)
         {
-            snapshot.TurnPhase = AgentTurnPhase.None;
-            snapshot.Activity = AgentActivityKind.None;
-            snapshot.EvidenceSource = AgentEvidenceSource.Process;
-            snapshot.EvidenceKind = codexRunning
-                ? "process_running" : "process_stopped";
-            snapshot.AttentionReason = AgentAttentionReason.None;
-            snapshot.FailureSeverity = AgentFailureSeverity.None;
-            if (codexRunning)
-            {
-                snapshot.State = HaloState.Done;
-                snapshot.Label = "STANDBY";
-                snapshot.Detail = L10n.Instance["status.standby_codex"];
-                snapshot.Presence = AgentPresenceState.Standby;
-            }
-            else
-            {
-                snapshot.State = HaloState.Idle;
-                snapshot.Label = CodexSessionMonitor.StateLabel(HaloState.Idle);
-                snapshot.Detail = L10n.Instance["status.offline_codex"];
-                snapshot.Presence = AgentPresenceState.Offline;
-            }
+            return dimmedUtc != DateTime.MinValue &&
+                nowUtc - dimmedUtc >= TimeSpan.FromMinutes(1);
+        }
+
+        internal static bool IsCurrentError(AggregateSnapshot snapshot,
+            AgentKind agent, string threadId, DateTime errorUtc)
+        {
+            return snapshot != null && snapshot.State == HaloState.Error &&
+                snapshot.FocusedAgent == agent && snapshot.Sessions != null &&
+                snapshot.Sessions.Any(delegate(SessionSnapshot session)
+                {
+                    return session.State == HaloState.Error &&
+                        session.LastEventUtc == errorUtc &&
+                        String.Equals(session.ThreadId, threadId,
+                            StringComparison.Ordinal);
+                });
+        }
+
+        private void SyncDetails()
+        {
+            details.SyncContent(providerSnapshot, EnabledAgentDescriptors(),
+                !settings.Paused);
         }
 
         private void OnMouseDown(object sender, MouseButtonEventArgs e)
@@ -743,7 +742,7 @@ public sealed class HaloWindow : Window
                 details.Topmost = Topmost;
             }
             providerSnapshot.Aggregate = detailsAggregate;
-            details.UpdateContent(providerSnapshot);
+            SyncDetails();
             PositionDetails();
             if (!details.IsVisible)
             {
@@ -1057,7 +1056,6 @@ public sealed class HaloWindow : Window
                         SettingsStorage.Log("Agent monitoring toggle failed: " +
                             ex.Message);
                     }
-                    details.SetAgentSwitchingEnabled(!settings.Paused);
                     RefreshState();
                     BuildTrayMenu();
                 }));

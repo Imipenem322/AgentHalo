@@ -50,18 +50,20 @@ public sealed class CodexUsageMonitor : IDisposable
         private const string OAuthClientId = "app_EMoamEEZ73f0CkXaXp7hrann";
         private static readonly TimeSpan RefreshInterval = TimeSpan.FromMinutes(5);
         private static readonly TimeSpan StaleInterval = TimeSpan.FromMinutes(10);
-        private static readonly TimeSpan RefreshWindow = TimeSpan.FromMinutes(5);
         private static readonly Lazy<CodexUsageMonitor> lazyInstance =
             new Lazy<CodexUsageMonitor>(delegate { return new CodexUsageMonitor(); },
                 LazyThreadSafetyMode.ExecutionAndPublication);
 
         private readonly object gate = new object();
+        private readonly string codexDataRoot;
         private readonly Timer refreshTimer;
         private readonly Timer localSnapshotTimer;
         private UsageMetrics remoteMetrics;
         private UsageMetrics localMetrics;
         private DateTime remoteRefreshedUtc;
         private string remoteAccountKey;
+        private string observedAccountKey;
+        private bool localMetricsSuppressed;
         private DateTime lastAttemptUtc;
         private DateTime cooldownUntilUtc;
         private long refreshInFlightEpoch;
@@ -85,6 +87,7 @@ public sealed class CodexUsageMonitor : IDisposable
 
         private CodexUsageMonitor()
         {
+            codexDataRoot = AgentHaloPaths.CodexDataRootDirectory();
             LoadMatchingCache();
             refreshTimer = new Timer(delegate { RequestRefresh(); }, null,
                 Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
@@ -107,6 +110,7 @@ public sealed class CodexUsageMonitor : IDisposable
                 activationEpoch = NextEpoch(activationEpoch);
                 active = true;
                 lastAttemptUtc = DateTime.MinValue;
+                RateLimitReader.ClearCache(codexDataRoot);
                 refreshTimer.Change(TimeSpan.Zero, RefreshInterval);
                 localSnapshotTimer.Change(TimeSpan.Zero, TimeSpan.FromSeconds(3));
                 return activationEpoch;
@@ -136,6 +140,7 @@ public sealed class CodexUsageMonitor : IDisposable
                     Timeout.InfiniteTimeSpan);
                 localSnapshotTimer.Change(Timeout.InfiniteTimeSpan,
                     Timeout.InfiniteTimeSpan);
+                RateLimitReader.ClearCache(codexDataRoot);
             }
         }
 
@@ -181,7 +186,9 @@ public sealed class CodexUsageMonitor : IDisposable
         {
             lock (gate)
             {
-                metrics = Merge(localMetrics, remoteMetrics, DateTime.UtcNow);
+                metrics = Merge(localMetricsSuppressed
+                        ? LocalContextOnly(localMetrics) : localMetrics,
+                    remoteMetrics, DateTime.UtcNow);
             }
             return HasAny(metrics);
         }
@@ -238,6 +245,7 @@ public sealed class CodexUsageMonitor : IDisposable
             }
             refreshTimer.Dispose();
             localSnapshotTimer.Dispose();
+            RateLimitReader.ClearCache(codexDataRoot);
         }
 
         private void RequestLocalRefresh()
@@ -259,10 +267,12 @@ public sealed class CodexUsageMonitor : IDisposable
                 try
                 {
                     UsageMetrics parsed;
-                    RateLimitReader.TryRead(out parsed);
+                    bool scanSucceeded;
+                    RateLimitReader.TryRead(codexDataRoot, out parsed,
+                        out scanSucceeded);
                     lock (gate)
                     {
-                        if (IsActiveEpochLocked(requestEpoch))
+                        if (scanSucceeded && IsActiveEpochLocked(requestEpoch))
                         {
                             changed = !MetricsEqual(localMetrics, parsed);
                             localMetrics = Clone(parsed);
@@ -299,22 +309,38 @@ public sealed class CodexUsageMonitor : IDisposable
                 {
                     return;
                 }
-                CodexOAuthAccess access = CodexAuthStore.Resolve();
+                bool explicitApiKey;
+                CodexOAuthAccess access = CodexAuthStore.Resolve(
+                    out explicitApiKey);
                 if (access == null)
                 {
+                    CodexProviderProfile profile = CodexProviderProfileReader.Read(
+                        Path.Combine(codexDataRoot, "config.toml"));
                     lock (gate)
                     {
                         if (IsActiveEpochLocked(requestEpoch))
                         {
-                            status = CodexUsageDataStatus.ApiKey;
+                            if (!String.IsNullOrWhiteSpace(observedAccountKey))
+                            {
+                                localMetricsSuppressed = true;
+                            }
                             remoteMetrics = null;
+                            remoteRefreshedUtc = DateTime.MinValue;
                             remoteAccountKey = null;
+                            status = explicitApiKey || profile.IsCustomApi
+                                ? CodexUsageDataStatus.ApiKey
+                                : CodexUsageDataStatus.NoData;
                             notify = true;
                         }
                     }
                     return;
                 }
 
+                if (ObserveAccount(access, requestEpoch))
+                {
+                    notify = true;
+                    RaiseUpdated(requestEpoch);
+                }
                 LoadCacheForAccess(access, requestEpoch);
                 if (!IsActiveEpoch(requestEpoch))
                 {
@@ -330,6 +356,12 @@ public sealed class CodexUsageMonitor : IDisposable
                     }
                     CodexUsageSnapshotCache.Migrate(previousAccountKey,
                         access.AccountKey);
+                    if (ObserveAccount(access, requestEpoch))
+                    {
+                        notify = true;
+                        RaiseUpdated(requestEpoch);
+                        LoadCacheForAccess(access, requestEpoch);
+                    }
                 }
 
                 CodexUsageHttpResponse response = FetchUsage(access);
@@ -347,6 +379,12 @@ public sealed class CodexUsageMonitor : IDisposable
                     }
                     CodexUsageSnapshotCache.Migrate(previousAccountKey,
                         access.AccountKey);
+                    if (ObserveAccount(access, requestEpoch))
+                    {
+                        notify = true;
+                        RaiseUpdated(requestEpoch);
+                        LoadCacheForAccess(access, requestEpoch);
+                    }
                     response = FetchUsage(access);
                     if (!IsActiveEpoch(requestEpoch))
                     {
@@ -468,14 +506,60 @@ public sealed class CodexUsageMonitor : IDisposable
             }
         }
 
+        private bool ObserveAccount(CodexOAuthAccess access,
+            long expectedEpoch)
+        {
+            if (access == null || String.IsNullOrWhiteSpace(access.AccountKey))
+            {
+                return false;
+            }
+            lock (gate)
+            {
+                if (expectedEpoch != 0 &&
+                    !IsActiveEpochLocked(expectedEpoch))
+                {
+                    return false;
+                }
+                string previousAccountKey = !String.IsNullOrWhiteSpace(
+                    observedAccountKey) ? observedAccountKey : remoteAccountKey;
+                bool changed = !String.IsNullOrWhiteSpace(previousAccountKey) &&
+                    !String.Equals(previousAccountKey, access.AccountKey,
+                        StringComparison.Ordinal);
+                if (changed)
+                {
+                    remoteMetrics = null;
+                    remoteRefreshedUtc = DateTime.MinValue;
+                    remoteAccountKey = null;
+                    localMetricsSuppressed = true;
+                    status = CodexUsageDataStatus.NoData;
+                }
+                observedAccountKey = access.AccountKey;
+                return changed;
+            }
+        }
+
         private void LoadMatchingCache()
         {
             try
             {
-                CodexOAuthAccess access = CodexAuthStore.Resolve();
+                bool explicitApiKey;
+                CodexOAuthAccess access = CodexAuthStore.Resolve(
+                    out explicitApiKey);
                 if (access != null)
                 {
+                    ObserveAccount(access, 0);
                     LoadCacheForAccess(access);
+                }
+                else
+                {
+                    CodexProviderProfile profile = CodexProviderProfileReader.Read(
+                        Path.Combine(codexDataRoot, "config.toml"));
+                    lock (gate)
+                    {
+                        status = explicitApiKey || profile.IsCustomApi
+                            ? CodexUsageDataStatus.ApiKey
+                            : CodexUsageDataStatus.NoData;
+                    }
                 }
             }
             catch
@@ -714,6 +798,19 @@ public sealed class CodexUsageMonitor : IDisposable
             return result;
         }
 
+        private static UsageMetrics LocalContextOnly(UsageMetrics source)
+        {
+            if (source == null)
+            {
+                return null;
+            }
+            return new UsageMetrics
+            {
+                ContextInputTokens = source.ContextInputTokens,
+                ContextWindowTokens = source.ContextWindowTokens
+            };
+        }
+
         internal static UsageMetrics MergeForTest(UsageMetrics local,
             UsageMetrics remote, DateTime nowUtc)
         {
@@ -861,11 +958,21 @@ internal static class CodexAuthStore
 
         public static CodexOAuthAccess Resolve()
         {
-            foreach (string path in AuthPaths())
+            bool explicitApiKey;
+            return Resolve(out explicitApiKey);
+        }
+
+        public static CodexOAuthAccess Resolve(out bool explicitApiKey)
+        {
+            explicitApiKey = false;
+            foreach (string path in AgentHaloPaths.CodexAuthPaths())
             {
-                CodexOAuthAccess access = Reload(path);
+                bool pathHasApiKey;
+                CodexOAuthAccess access = Reload(path, out pathHasApiKey);
+                explicitApiKey = explicitApiKey || pathHasApiKey;
                 if (access != null)
                 {
+                    explicitApiKey = false;
                     return access;
                 }
             }
@@ -874,6 +981,14 @@ internal static class CodexAuthStore
 
         public static CodexOAuthAccess Reload(string path)
         {
+            bool explicitApiKey;
+            return Reload(path, out explicitApiKey);
+        }
+
+        private static CodexOAuthAccess Reload(string path,
+            out bool explicitApiKey)
+        {
+            explicitApiKey = false;
             try
             {
                 if (String.IsNullOrWhiteSpace(path) || !File.Exists(path))
@@ -884,6 +999,7 @@ internal static class CodexAuthStore
                 Dictionary<string, object> root = Serializer.DeserializeObject(
                     Encoding.UTF8.GetString(bytes)) as Dictionary<string, object>;
                 Dictionary<string, object> tokens = CodexUsageJson.Child(root, "tokens");
+                explicitApiKey = HasExplicitApiKey(root, tokens);
                 string accessToken = CodexUsageJson.Text(tokens, "access_token").Trim();
                 if (String.IsNullOrWhiteSpace(accessToken))
                 {
@@ -910,8 +1026,28 @@ internal static class CodexAuthStore
             }
             catch
             {
+                explicitApiKey = false;
                 return null;
             }
+        }
+
+        private static bool HasExplicitApiKey(
+            Dictionary<string, object> root,
+            Dictionary<string, object> tokens)
+        {
+            string mode = CodexUsageJson.Text(root, "auth_mode").Trim();
+            if (String.Equals(mode, "api_key", StringComparison.OrdinalIgnoreCase) ||
+                String.Equals(mode, "api-key", StringComparison.OrdinalIgnoreCase) ||
+                String.Equals(mode, "apikey", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+            return !String.IsNullOrWhiteSpace(CodexUsageJson.Text(root,
+                       "OPENAI_API_KEY")) ||
+                !String.IsNullOrWhiteSpace(CodexUsageJson.Text(root, "api_key")) ||
+                !String.IsNullOrWhiteSpace(CodexUsageJson.Text(tokens,
+                       "OPENAI_API_KEY")) ||
+                !String.IsNullOrWhiteSpace(CodexUsageJson.Text(tokens, "api_key"));
         }
 
         public static bool NeedsRefresh(CodexOAuthAccess access, DateTime nowUtc)
@@ -984,19 +1120,6 @@ internal static class CodexAuthStore
                 LastRefreshUtc = DateTime.UtcNow,
                 Document = expected.Document
             };
-        }
-
-        private static IEnumerable<string> AuthPaths()
-        {
-            string codexHome = Environment.GetEnvironmentVariable("CODEX_HOME");
-            if (!String.IsNullOrWhiteSpace(codexHome))
-            {
-                yield return Path.Combine(codexHome.Trim(), "auth.json");
-                yield break;
-            }
-            string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-            yield return Path.Combine(home, ".config", "codex", "auth.json");
-            yield return Path.Combine(home, ".codex", "auth.json");
         }
 
         private static DateTime ParseDate(string value)
