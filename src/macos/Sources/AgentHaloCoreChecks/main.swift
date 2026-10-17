@@ -1,5 +1,6 @@
 import Foundation
 import AgentHaloCore
+import SQLite3
 
 func expect<T: Equatable>(_ actual: T, _ expected: T, _ message: String) {
     if actual != expected {
@@ -10,6 +11,27 @@ func expect<T: Equatable>(_ actual: T, _ expected: T, _ message: String) {
 func expect(_ condition: Bool, _ message: String) {
     if !condition {
         fatalError(message)
+    }
+}
+
+func executeSQLiteFixtureSQL(_ query: String, databaseURL: URL) throws {
+    var database: OpaquePointer?
+    let openResult = databaseURL.path(percentEncoded: false).withCString {
+        sqlite3_open($0, &database)
+    }
+    guard openResult == SQLITE_OK, let database else {
+        if let database {
+            sqlite3_close(database)
+        }
+        throw NSError(domain: "AgentHaloCoreChecks.SQLite", code: Int(openResult))
+    }
+    defer { sqlite3_close(database) }
+
+    let result = query.withCString {
+        sqlite3_exec(database, $0, nil, nil, nil)
+    }
+    guard result == SQLITE_OK else {
+        throw NSError(domain: "AgentHaloCoreChecks.SQLite", code: Int(result))
     }
 }
 
@@ -638,6 +660,105 @@ func testCodexSessionMonitorPrefersIndexTitleAndKeepsMetadataFallback() throws {
     expect(sessions[fallbackID]?.sessionTitle, "Metadata fallback", "metadata title should remain the fallback")
 }
 
+func testCodexSessionMonitorThrottlesDiscoveryAndFindsNewFiles() throws {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-discovery-\(UUID().uuidString)", isDirectory: true)
+    let sessionsRoot = root.appendingPathComponent("sessions", isDirectory: true)
+    try FileManager.default.createDirectory(at: sessionsRoot, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    let indexURL = root.appendingPathComponent("session_index.jsonl")
+    let firstSession = sessionsRoot.appendingPathComponent("first.jsonl")
+    let secondSession = sessionsRoot.appendingPathComponent("second.jsonl")
+    try Data("{}\n".utf8).write(to: firstSession)
+    let monitor = CodexSessionMonitor(
+        sessionsRoot: sessionsRoot,
+        sessionTitleReader: CodexSessionTitleReader(indexURL: indexURL)
+    )
+    let now = Date()
+
+    _ = monitor.refresh(now: now)
+    expect(monitor.snapshots().count, 1, "initial discovery should find the existing session")
+
+    try Data("{}\n".utf8).write(to: secondSession)
+    expect(monitor.refresh(now: now.addingTimeInterval(9)), false, "unchanged directory should not be rediscovered early")
+    expect(monitor.snapshots().count, 1, "new session should wait for the discovery interval")
+    expect(monitor.refresh(now: now.addingTimeInterval(10)), true, "new session should be found at the discovery interval")
+    expect(monitor.snapshots().count, 2, "rediscovery should add the new session")
+}
+
+func testCodexSessionMonitorDoesNotRestorePreExitActivityFromOldLines() throws {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-exit-baseline-\(UUID().uuidString)", isDirectory: true)
+    let sessionsRoot = root.appendingPathComponent("sessions", isDirectory: true)
+    try FileManager.default.createDirectory(at: sessionsRoot, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    let session = sessionsRoot.appendingPathComponent("exit-baseline.jsonl")
+    let now = Date()
+    let formatter = ISO8601DateFormatter()
+    let metadataTime = formatter.string(from: now.addingTimeInterval(-6))
+    let startTime = formatter.string(from: now.addingTimeInterval(-5))
+    let tailStartTime = formatter.string(from: now.addingTimeInterval(-1))
+    let nextStartTime = formatter.string(from: now.addingTimeInterval(5))
+    let contextTime = formatter.string(from: now.addingTimeInterval(-5.5))
+    let longEventTime = formatter.string(from: now.addingTimeInterval(-4))
+    let longText = String(repeating: "x", count: 400)
+    let metadata = #"{"timestamp":"\#(metadataTime)","type":"session_meta","payload":{"id":"exit-baseline","cwd":"/tmp","title":"Restored title"}}"#
+    let context = #"{"timestamp":"\#(contextTime)","type":"turn_context","payload":{"model":"baseline-test-model"}}"#
+    let oldStart = #"{"timestamp":"\#(startTime)","type":"event_msg","payload":{"type":"task_started"}}"#
+    let tailStart = #"{"timestamp":"\#(tailStartTime)","type":"event_msg","payload":{"type":"task_started"}}"#
+    let longEvent = #"{"timestamp":"\#(longEventTime)","type":"response_item","payload":{"type":"message","phase":"commentary","content":[{"type":"output_text","text":"\#(longText)"}]}}"#
+    try Data("\(metadata)\n\(context)\n\(oldStart)\n\(longEvent)\n".utf8).write(to: session)
+
+    let monitor = CodexSessionMonitor(
+        sessionsRoot: sessionsRoot,
+        sessionTitleReader: CodexSessionTitleReader(
+            indexURL: root.appendingPathComponent("session_index.jsonl")
+        )
+    )
+    _ = monitor.refresh(now: now)
+    expect(monitor.snapshots().first?.active == true, "existing task should start active")
+
+    // This pre-exit event is newer than the last line the monitor read.
+    let appendedHandle = try FileHandle(forWritingTo: session)
+    try appendedHandle.seekToEnd()
+    try appendedHandle.write(contentsOf: Data("\(tailStart)\n".utf8))
+    try appendedHandle.close()
+    monitor.agentDidExit(at: now)
+    expect(monitor.snapshots().first?.active == false, "process exit should clear in-memory activity")
+
+    // Resetting a file replays metadata but must filter old activity events.
+    try Data("\(metadata)\n\(context)\n\(oldStart)\n\(tailStart)\n".utf8).write(to: session)
+    _ = monitor.refresh(now: now.addingTimeInterval(1))
+    _ = monitor.refresh(now: now.addingTimeInterval(2))
+    let restored = monitor.snapshots().first
+    expect(restored?.active == false, "old task line should not reactivate after file reset")
+    expect(restored?.sessionTitle, "Restored title", "old session metadata should restore after file reset")
+    expect(restored?.modelName, "baseline-test-model", "old turn metadata should restore after file reset")
+
+    let newStart = #"{"timestamp":"\#(nextStartTime)","type":"event_msg","payload":{"type":"task_started"}}"#
+    let handle = try FileHandle(forWritingTo: session)
+    try handle.seekToEnd()
+    try handle.write(contentsOf: Data("\(newStart)\n".utf8))
+    try handle.close()
+    _ = monitor.refresh(now: now.addingTimeInterval(5))
+    expect(monitor.snapshots().first?.active == true, "new post-restart event should reactivate the task")
+    monitor.agentDidExit(
+        at: now.addingTimeInterval(4),
+        preservingNewerActivity: true
+    )
+    expect(monitor.snapshots().first?.active == true,
+           "fast-restart cleanup should preserve a task read after the new launch")
+
+    let undiscoveredSession = sessionsRoot.appendingPathComponent("undiscovered.jsonl")
+    try Data("\(oldStart)\n".utf8).write(to: undiscoveredSession)
+    _ = monitor.refresh(now: now.addingTimeInterval(10))
+    let sessions = Dictionary(uniqueKeysWithValues: monitor.snapshots().map { ($0.threadId, $0) })
+    expect(sessions["undiscovered"]?.active == false,
+           "newly discovered pre-exit session should use the monitor exit baseline")
+}
+
 func testToolFailedDoesNotBecomeFatalError() {
     let now = ISO8601DateFormatter().date(from: "2026-06-13T02:00:00Z")!
     var reducer = SessionReducer(filePath: "/tmp/tool-failed.jsonl", now: now, liveTracking: true)
@@ -907,6 +1028,43 @@ func testCodexRealtimeActivityReaderDetectsAnswerStreaming() {
     // mid-answer (via `answerStreaming = true`). PR #10 keeps it blue working
     // so users can't confuse mid-stream with completion.
     expect(activity?.answerStreaming, false, "answer text delta should stay blue working, not flip to done")
+}
+
+func testCodexRealtimeActivityReaderUsesNanosecondLifecycleBaseline() throws {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-realtime-baseline-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    let databaseURL = root.appendingPathComponent("logs_2.sqlite")
+    try executeSQLiteFixtureSQL(
+        "create table logs (id integer primary key, ts integer, ts_nanos integer, target text, feedback_log_body text);",
+        databaseURL: databaseURL
+    )
+
+    let timestampSeconds = Int64(Date().timeIntervalSince1970.rounded(.down))
+    let baseline = Date(timeIntervalSince1970: Double(timestampSeconds) + 0.5)
+    let now = Date(timeIntervalSince1970: Double(timestampSeconds) + 0.9)
+    let oldEvent = #"SSE event: {"type":"response.output_text.delta","delta":"old response"}"#
+    let newEvent = #"SSE event: {"type":"response.output_text.delta","delta":"new response"}"#
+    let reader = CodexRealtimeActivityReader(databaseURL: databaseURL)
+
+    try executeSQLiteFixtureSQL(
+        "insert into logs values (1, \(timestampSeconds), 400000000, 'codex_api::sse::responses', '\(oldEvent)');",
+        databaseURL: databaseURL
+    )
+    expect(
+        reader.readActive(now: now, notBefore: baseline) == nil,
+        "same-second pre-lifecycle SQLite event must not restore Working"
+    )
+
+    try executeSQLiteFixtureSQL(
+        "insert into logs values (2, \(timestampSeconds), 600000000, 'codex_api::sse::responses', '\(newEvent)');",
+        databaseURL: databaseURL
+    )
+    let activity = reader.readActive(now: now, notBefore: baseline)
+    expect(activity?.state, .working, "same-second post-launch SQLite event should restore Working")
+    expect(activity?.action, "Writing answer", "new lifecycle activity should keep its action")
 }
 
 func testCodexRealtimeActivityReaderDetectsContextCompactionStream() {
@@ -1461,6 +1619,8 @@ func runCoreChecks() async throws {
     testSessionReducerCapturesOnlyExplicitCodexSessionTitles()
     try testCodexSessionTitleReaderUsesLatestValidTitle()
     try testCodexSessionMonitorPrefersIndexTitleAndKeepsMetadataFallback()
+    try testCodexSessionMonitorThrottlesDiscoveryAndFindsNewFiles()
+    try testCodexSessionMonitorDoesNotRestorePreExitActivityFromOldLines()
     testToolFailedDoesNotBecomeFatalError()
     try testMonitorHandlesPendingLinesAndTruncation()
     testAggregatorHidesAcknowledgedErrorsAndShowsStandbyInput()
@@ -1479,6 +1639,7 @@ func runCoreChecks() async throws {
     testRateLimitReaderDoesNotTreatEmptyLegacyCreditsSecondaryAsMonthly()
     testRateLimitReaderDoesNotReturnEarlyOnContextOnlySnapshot()
     testCodexRealtimeActivityReaderDetectsAnswerStreaming()
+    try testCodexRealtimeActivityReaderUsesNanosecondLifecycleBaseline()
     testCodexRealtimeActivityReaderDetectsContextCompactionStream()
     testCodexRealtimeActivityReaderDetectsArgumentStream()
     testCodexRealtimeActivityReaderEscalatedArgumentsAttention()

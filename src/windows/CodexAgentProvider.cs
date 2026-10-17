@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading;
 
@@ -20,15 +21,33 @@ internal sealed class CodexAgentProvider : IAgentProvider
         private readonly CodexSessionMonitor monitor;
         private readonly CodexUsageMonitor usageMonitor;
         private readonly string codexDataRoot;
+        private readonly object lifecycleGate = new object();
+        private readonly Func<string[]> processProbe;
+        private readonly Timer processTimer;
+        private volatile bool codexRunning;
+        private volatile bool processStateKnown;
+        private string[] processIdentities = new string[0];
+        private volatile bool collecting;
+        private CodexCustomApiMetrics lastCustomMetrics;
         private long usageActivationEpoch;
         private volatile bool active;
         private volatile bool disposed;
 
         public CodexAgentProvider()
+            : this(new CodexSessionMonitor(AgentHaloPaths.CodexDataRootDirectory()),
+                CodexUsageMonitor.Instance, ProbeCodexProcess)
+        {
+        }
+
+        internal CodexAgentProvider(CodexSessionMonitor sessionMonitor,
+            CodexUsageMonitor quotaMonitor, Func<string[]> probe)
         {
             codexDataRoot = AgentHaloPaths.CodexDataRootDirectory();
-            monitor = new CodexSessionMonitor(codexDataRoot);
-            usageMonitor = CodexUsageMonitor.Instance;
+            monitor = sessionMonitor;
+            usageMonitor = quotaMonitor;
+            processProbe = probe;
+            processTimer = new Timer(PollProcess, null,
+                Timeout.Infinite, Timeout.Infinite);
             monitor.Changed += OnMonitorChanged;
             usageMonitor.UpdatedForActivation += OnUsageUpdated;
         }
@@ -47,52 +66,138 @@ internal sealed class CodexAgentProvider : IAgentProvider
 
         public void Start()
         {
-            if (disposed || active)
+            lock (lifecycleGate)
             {
-                return;
-            }
-            try
-            {
-                monitor.Start();
-                active = true;
-                long activatedEpoch = usageMonitor.Activate();
-                if (activatedEpoch == 0)
+                if (disposed || active)
                 {
-                    throw new ObjectDisposedException("CodexUsageMonitor");
-                }
-                Interlocked.Exchange(ref usageActivationEpoch,
-                    activatedEpoch);
-            }
-            catch
-            {
-                active = false;
-                long failedEpoch = Interlocked.Exchange(
-                    ref usageActivationEpoch, 0);
-                try
-                {
-                    monitor.Stop();
-                }
-                catch
-                {
+                    return;
                 }
                 try
                 {
-                    usageMonitor.Deactivate(failedEpoch);
+                    active = true;
+                    ApplyProcessProbeLocked(processProbe());
+                    UpdateCollectionLocked();
+                    processTimer.Change(collecting ? 1000 : 3000,
+                        collecting ? 1000 : 3000);
                 }
                 catch
                 {
+                    active = false;
+                    try { StopCollectionLocked(); }
+                    catch { }
+                    throw;
                 }
-                throw;
             }
         }
 
         public void Stop()
         {
-            if (disposed || !active)
+            lock (lifecycleGate)
             {
+                if (disposed || !active) return;
+                active = false;
+                processTimer.Change(Timeout.Infinite, Timeout.Infinite);
+                StopCollectionLocked();
+            }
+        }
+
+        private static string[] ProbeCodexProcess()
+        {
+            string[] identities;
+            return CodexRuntimeReader.TryReadProcessIdentities(out identities)
+                ? identities : null;
+        }
+
+        private void PollProcess(object state)
+        {
+            bool changed = false;
+            try
+            {
+                lock (lifecycleGate)
+                {
+                    if (!active || disposed) return;
+                    string[] identities = processProbe();
+                    if (identities == null) return;
+                    changed = ApplyProcessProbeLocked(identities);
+                    UpdateCollectionLocked();
+                    if (changed)
+                    {
+                        processTimer.Change(codexRunning ? 1000 : 3000,
+                            codexRunning ? 1000 : 3000);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                SettingsStorage.Log("Codex process monitoring failed: " + ex.Message);
+            }
+            if (changed) RaiseChanged();
+        }
+
+        private bool ApplyProcessProbeLocked(string[] identities)
+        {
+            if (identities == null) return false;
+            bool running = identities.Length > 0;
+            bool restarted = processStateKnown && codexRunning && running &&
+                !processIdentities.Intersect(identities, StringComparer.Ordinal).Any();
+            bool starting = running && (!processStateKnown || !codexRunning);
+            bool changed = !processStateKnown || codexRunning != running || restarted;
+            if (restarted)
+            {
+                monitor.SetCodexRunning(false, EarliestProcessStartUtc(identities));
+                StopCollectionLocked();
+            }
+            else if (starting)
+            {
+                monitor.SetCodexRunning(true, EarliestProcessStartUtc(identities));
+            }
+            processStateKnown = true;
+            processIdentities = identities;
+            codexRunning = running;
+            return changed;
+        }
+
+        private static DateTime EarliestProcessStartUtc(string[] identities)
+        {
+            DateTime earliest = DateTime.MaxValue;
+            foreach (string identity in identities)
+            {
+                int separator = identity.IndexOf(':');
+                long ticks;
+                if (separator >= 0 && Int64.TryParse(identity.Substring(separator + 1),
+                    out ticks) && ticks >= DateTime.MinValue.Ticks &&
+                    ticks <= DateTime.MaxValue.Ticks)
+                {
+                    DateTime started = new DateTime(ticks, DateTimeKind.Utc);
+                    if (started < earliest) earliest = started;
+                }
+            }
+            return earliest == DateTime.MaxValue ? DateTime.UtcNow : earliest;
+        }
+
+        private void UpdateCollectionLocked()
+        {
+            if (processStateKnown) monitor.SetCodexRunning(codexRunning);
+            if (processStateKnown && !codexRunning)
+            {
+                if (collecting) StopCollectionLocked();
                 return;
             }
-            active = false;
+            if (collecting) return;
+            monitor.Start();
+            long activatedEpoch = usageMonitor.Activate();
+            if (activatedEpoch == 0)
+            {
+                monitor.Stop();
+                throw new ObjectDisposedException("CodexUsageMonitor");
+            }
+            Interlocked.Exchange(ref usageActivationEpoch, activatedEpoch);
+            collecting = true;
+        }
+
+        private void StopCollectionLocked()
+        {
+            collecting = false;
             long stoppedEpoch = Interlocked.Exchange(
                 ref usageActivationEpoch, 0);
             Exception failure = null;
@@ -133,11 +238,24 @@ internal sealed class CodexAgentProvider : IAgentProvider
                 throw new ObjectDisposedException("CodexAgentProvider");
             }
             HaloSettings effectiveSettings = settings ?? new HaloSettings();
-            bool codexRunning = CodexRuntimeReader.IsRunning();
-            monitor.SetCodexRunning(codexRunning);
-            AggregateSnapshot aggregate = monitor.GetAggregate(
-                effectiveSettings, codexRunning);
-            if (codexRunning && aggregate.Presence ==
+            bool running = codexRunning;
+            List<SessionSnapshot> sessions;
+            AggregateSnapshot aggregate = monitor.ReadSnapshot(
+                effectiveSettings, running, nowUtc, out sessions);
+            if (!processStateKnown && !effectiveSettings.Paused)
+            {
+                aggregate.State = HaloState.Idle;
+                aggregate.Label = "UNKNOWN";
+                aggregate.Detail = L10n.Instance["status.unknown"];
+                aggregate.Presence = AgentPresenceState.Standby;
+                aggregate.TurnPhase = AgentTurnPhase.None;
+                aggregate.Activity = AgentActivityKind.None;
+                aggregate.AttentionReason = AgentAttentionReason.None;
+                aggregate.FailureSeverity = AgentFailureSeverity.None;
+                aggregate.EvidenceSource = AgentEvidenceSource.Process;
+                aggregate.EvidenceKind = "process_unknown";
+            }
+            if (collecting && running && aggregate.Presence ==
                     AgentPresenceState.Standby)
             {
                 string appFailure;
@@ -145,25 +263,26 @@ internal sealed class CodexAgentProvider : IAgentProvider
                 bool hasAppFailure = CodexFailureReader.TryReadRecent(
                     codexDataRoot, out appFailure, out appFailureUtc);
                 ApplyApplicationFailure(aggregate, effectiveSettings,
-                    codexRunning, hasAppFailure, appFailure, appFailureUtc);
+                    running, hasAppFailure, appFailure, appFailureUtc);
             }
 
-            List<SessionSnapshot> sessions = monitor.GetAllRecent();
             UsageMetrics usage;
             if (!usageMonitor.TryReadCached(out usage))
             {
                 usage = null;
             }
-            CodexCustomApiMetrics customMetrics =
-                CodexCustomApiMetricsReader.Read(sessions,
+            if (collecting)
+            {
+                lastCustomMetrics = CodexCustomApiMetricsReader.Read(sessions,
                     CodexProviderProfileReader.Read(Path.Combine(codexDataRoot,
                         "config.toml")), usageMonitor.Status);
+            }
 
             return new AgentProviderSnapshot
             {
                 Aggregate = aggregate,
                 Sessions = sessions,
-                Details = CreateDetailsSnapshot(usage, customMetrics),
+                Details = CreateDetailsSnapshot(usage, lastCustomMetrics),
                 Capabilities = SupportedCapabilities,
                 Integration = new AgentIntegrationHealth
                 {
@@ -244,6 +363,7 @@ internal sealed class CodexAgentProvider : IAgentProvider
 
         public bool IsForeground(IntPtr foregroundWindow)
         {
+            if (active && processStateKnown && !codexRunning) return false;
             try
             {
                 if (foregroundWindow == IntPtr.Zero)
@@ -327,7 +447,7 @@ internal sealed class CodexAgentProvider : IAgentProvider
 
         private void OnMonitorChanged(object sender, EventArgs e)
         {
-            RaiseChanged();
+            if (collecting) RaiseChanged();
         }
 
         private void OnUsageUpdated(long activationEpoch)
@@ -369,6 +489,7 @@ internal sealed class CodexAgentProvider : IAgentProvider
                 failure = ex;
             }
             disposed = true;
+            processTimer.Dispose();
             monitor.Changed -= OnMonitorChanged;
             usageMonitor.UpdatedForActivation -= OnUsageUpdated;
             try

@@ -118,16 +118,23 @@ struct LiveErrorPresentationState {
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    private static let activeTickInterval: TimeInterval = 0.3
+    private static let offlineProcessCheckInterval: TimeInterval = 3
+
     private let settingsStore: SettingsStore
     private var settings: HaloSettings
     private let codexActivityMonitor = CodexActivityMonitor()
     private var codexActivitySnapshot = CodexActivitySnapshot.empty
+    private var codexActivityLifecycleGeneration: UInt64 = 0
     private var selectedPreview = PreviewPayload.live
     private var aggregate: AggregateSnapshot
     private var statusItem: NSStatusItem!
     private var panel: HaloPanel!
     private var haloView: HaloView!
     private var timer: Timer?
+    private var timerInterval: TimeInterval?
+    private var codexRunningState: Bool?
+    private var codexProcessIdentifiers: Set<Int32> = []
     private var detailsPanel = DetailsPanel()
     private var hoverHideTimer: Timer?
     private var settingsSaveTimer: Timer?
@@ -137,6 +144,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var usageStates: [UsageProviderID: UsageMonitorState] = [:]
     private var usageRefreshLoopTask: Task<Void, Never>?
     private var usageRequestTasks: [UsageProviderID: UsageRequestRecord] = [:]
+    private var usageLifecycleTask: Task<Void, Never>?
+    private var usageLifecycleGeneration: UInt64 = 0
+    private var usageMonitoringTerminating = false
     private let usageRefreshInterval: TimeInterval = 5 * 60
     private var usageTerminationHandshake = UsageTerminationHandshake()
     private let instanceLock = InstanceLock()
@@ -192,8 +202,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Initialize L10n with user's saved preference
         L10n.shared.setLanguage(settings.language)
         currentLanguage = L10n.shared.currentLanguage
-        startUsageRefreshLoop()
-        requestUsageRefresh(for: .codex)
 
         // Observe language changes
         languageObserver = NotificationCenter.default.addObserver(
@@ -216,7 +224,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         tick()
-        timer = Timer.scheduledTimer(timeInterval: 0.3, target: self, selector: #selector(timerDidFire), userInfo: nil, repeats: true)
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -226,9 +233,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard usageTerminationHandshake.beginCancellation() else {
             return .terminateLater
         }
+        usageMonitoringTerminating = true
+        usageLifecycleGeneration &+= 1
         cancelLocalUsageTasks()
+        codexActivityMonitor.stop()
+        timer?.invalidate()
+        timer = nil
+        timerInterval = nil
+        let pendingUsageLifecycleTask = usageLifecycleTask
         Task { @MainActor [weak self] in
             guard let self else { return }
+            await pendingUsageLifecycleTask?.value
             await self.usageCoordinator.cancelAll()
             guard self.usageTerminationHandshake.finishCancellation() else {
                 return
@@ -241,6 +256,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         cancelLocalUsageTasks()
         codexActivityMonitor.stop()
+        timer?.invalidate()
+        timer = nil
         NSWorkspace.shared.notificationCenter.removeObserver(self)
         settingsSaveTimer?.invalidate()
         if placementState.shouldPersistCurrentFrame, let panel {
@@ -265,31 +282,136 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func tick() {
+        let now = Date()
+        let codexApplications = currentCodexApplications()
+        let processIdentifiers = Set(codexApplications.map { Int32($0.processIdentifier) })
+        let exitBaseline = codexApplications.compactMap(\.launchDate).min()
+        let codexRunning = !processIdentifiers.isEmpty
+        updateCodexRunningState(
+            codexRunning,
+            processIdentifiers: processIdentifiers,
+            exitBaseline: exitBaseline
+        )
         if haloView?.isDragging == true {
             return
         }
-        let now = Date()
         acknowledgeCompletedIfCodexIsForeground()
-        let codexRunning = CodexAppDetector.isCodexRunning()
-        codexActivityMonitor.updatePollingContext(
-            focusedAgent: .codex,
-            codexRunning: codexRunning
-        )
         refreshAggregateAndUI(now: now, codexRunning: codexRunning)
     }
 
     private func codexActivityDidChange(_ snapshot: CodexActivitySnapshot) {
+        guard snapshot.lifecycleGeneration == codexActivityLifecycleGeneration else {
+            return
+        }
         guard haloView?.isDragging != true else {
             codexActivitySnapshot = snapshot
             return
         }
         codexActivitySnapshot = snapshot
-        let codexRunning = CodexAppDetector.isCodexRunning()
+        let codexRunning = codexRunningState ?? false
+        refreshAggregateAndUI(now: Date(), codexRunning: codexRunning)
+    }
+
+    private func currentCodexApplications() -> [NSRunningApplication] {
+        NSWorkspace.shared.runningApplications.filter { app in
+            CodexAppDetector.isCodexDesktopIdentity(
+                activationPolicy: app.activationPolicy,
+                bundleIdentifier: app.bundleIdentifier,
+                executableName: app.executableURL?.lastPathComponent,
+                localizedName: app.localizedName,
+                allowLocalizedName: false
+            )
+        }
+    }
+
+    private func updateCodexRunningState(
+        _ isRunning: Bool,
+        processIdentifiers: Set<Int32>,
+        exitBaseline: Date?
+    ) {
+        let previousProcessIdentifiers = codexProcessIdentifiers
+        codexProcessIdentifiers = processIdentifiers
+        let processRestarted = !previousProcessIdentifiers.isEmpty
+            && !processIdentifiers.isEmpty
+            && previousProcessIdentifiers.isDisjoint(with: processIdentifiers)
+        let stateChanged = codexRunningState != isRunning
+        guard stateChanged || processRestarted else {
+            return
+        }
+        codexActivityLifecycleGeneration &+= 1
+        let previous = codexRunningState
+        codexRunningState = isRunning
+        if !isRunning || processRestarted {
+            codexActivitySnapshot.realtimeActivity = nil
+        }
+        if processRestarted {
+            codexActivityMonitor.updatePollingContext(
+                focusedAgent: .codex,
+                codexRunning: false,
+                lifecycleGeneration: codexActivityLifecycleGeneration,
+                exitBaseline: exitBaseline,
+                preservingNewerActivity: true
+            )
+        }
         codexActivityMonitor.updatePollingContext(
             focusedAgent: .codex,
-            codexRunning: codexRunning
+            codexRunning: isRunning,
+            lifecycleGeneration: codexActivityLifecycleGeneration,
+            exitBaseline: isRunning ? exitBaseline : nil
         )
-        refreshAggregateAndUI(now: Date(), codexRunning: codexRunning)
+        scheduleTickTimer(interval: isRunning
+            ? Self.activeTickInterval
+            : Self.offlineProcessCheckInterval)
+
+        if previous == true || isRunning || processRestarted {
+            updateUsageLifecycle(isRunning: isRunning)
+        }
+    }
+
+    private func scheduleTickTimer(interval: TimeInterval) {
+        guard timerInterval != interval else {
+            return
+        }
+        timer?.invalidate()
+        timer = Timer.scheduledTimer(
+            timeInterval: interval,
+            target: self,
+            selector: #selector(timerDidFire),
+            userInfo: nil,
+            repeats: true
+        )
+        timerInterval = interval
+    }
+
+    private func updateUsageLifecycle(isRunning: Bool) {
+        guard !usageMonitoringTerminating else {
+            return
+        }
+        usageLifecycleGeneration &+= 1
+        let generation = usageLifecycleGeneration
+        let previousTask = usageLifecycleTask
+        cancelLocalUsageTasks()
+        usageLifecycleTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await previousTask?.value
+            guard self.usageLifecycleGeneration == generation,
+                  self.codexRunningState == isRunning,
+                  !self.usageMonitoringTerminating else {
+                return
+            }
+            if isRunning {
+                await self.usageCoordinator.cancelAll()
+                guard self.usageLifecycleGeneration == generation,
+                      self.codexRunningState == true,
+                      !self.usageMonitoringTerminating else {
+                    return
+                }
+                self.startUsageRefreshLoop()
+                self.requestUsageRefresh(for: .codex)
+            } else {
+                await self.usageCoordinator.cancelAll()
+            }
+        }
     }
 
     private func refreshAggregateAndUI(now: Date, codexRunning: Bool) {
@@ -798,6 +920,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func startUsageRefreshLoop() {
+        guard codexRunningState == true else {
+            return
+        }
         usageRefreshLoopTask?.cancel()
         let sleepNanoseconds = UInt64(usageRefreshInterval * 1_000_000_000)
         usageRefreshLoopTask = Task { [weak self] in
@@ -816,7 +941,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func requestUsageRefresh(for providerID: UsageProviderID) {
-        guard usageRequestTasks[providerID] == nil else {
+        guard codexRunningState == true,
+              usageRequestTasks[providerID] == nil else {
             return
         }
         let token = UUID()

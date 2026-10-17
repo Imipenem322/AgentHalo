@@ -30,6 +30,7 @@ public struct SessionReducer: Sendable {
     private var liveTracking: Bool
     private var currentTurnIsPlanMode = false
     private var planProposalSeen = false
+    private var activityBaselineAt: Date?
     private var hasTotalUsage = false
     private var turnUsageBaselineKnown = false
     private var totalInputTokens: Int64 = 0
@@ -61,14 +62,19 @@ public struct SessionReducer: Sendable {
         let topType = root.string("type")
         let payload = root.dictionary("payload")
         let eventAt = Self.parseDate(root.string("timestamp")) ?? now
-        snapshot.lastEventAt = eventAt
+        let isBeforeActivityBaseline = activityBaselineAt.map { eventAt <= $0 } ?? false
+        if !isBeforeActivityBaseline {
+            snapshot.lastEventAt = eventAt
+        }
 
         if topType == "turn_context", let payload {
             let model = payload.string("model")
             if !model.isEmpty {
                 snapshot.modelName = model
             }
-            updatePlanModeFromTurnContext(payload)
+            if !isBeforeActivityBaseline {
+                updatePlanModeFromTurnContext(payload)
+            }
             return
         }
 
@@ -99,6 +105,12 @@ public struct SessionReducer: Sendable {
         }
 
         let payloadType = payload.string("type")
+        if isBeforeActivityBaseline {
+            if topType == "event_msg", payloadType == "token_count" {
+                updateSessionDetails(from: payload)
+            }
+            return
+        }
         if topType == "event_msg" {
             if payloadType == "token_count" {
                 updateSessionDetails(from: payload)
@@ -107,6 +119,34 @@ public struct SessionReducer: Sendable {
         } else if topType == "response_item" {
             reduceResponse(payloadType.lowercased(), payload: payload, now: now)
         }
+    }
+
+    mutating func markAgentExited(
+        at exitTime: Date,
+        preservingNewerActivity: Bool = false
+    ) {
+        setActivityBaseline(at: exitTime)
+        guard snapshot.active,
+              !preservingNewerActivity || snapshot.lastEventAt <= exitTime else {
+            return
+        }
+        snapshot.active = false
+        snapshot.state = .idle
+        snapshot.action = "Ready"
+        inFlightTools = 0
+        workingVisibleUntil = nil
+        currentTurnIsPlanMode = false
+        planProposalSeen = false
+    }
+
+    mutating func setActivityBaseline(at date: Date) {
+        activityBaselineAt = max(activityBaselineAt ?? .distantPast, date)
+    }
+
+    mutating func resetAfterTruncation(filePath: String) {
+        let baseline = activityBaselineAt
+        self = SessionReducer(filePath: filePath, liveTracking: true)
+        activityBaselineAt = baseline
     }
 
     public mutating func setLiveTracking(_ value: Bool) {

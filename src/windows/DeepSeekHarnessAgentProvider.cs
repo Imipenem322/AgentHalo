@@ -9,6 +9,8 @@ namespace CodexHalo
 {
 internal sealed class DeepSeekHarnessAgentProvider : IAgentProvider
     {
+        private static readonly TimeSpan OfflineProbeInterval =
+            TimeSpan.FromSeconds(3);
         internal const AgentCapability SupportedCapabilities =
             AgentCapability.Lifecycle | AgentCapability.ToolName |
             AgentCapability.Attention;
@@ -16,14 +18,18 @@ internal sealed class DeepSeekHarnessAgentProvider : IAgentProvider
         private readonly object pollGate = new object();
         private readonly object notificationGate = new object();
         private readonly DeepSeekHarnessSnapshotReader snapshotReader;
-        private Timer timer;
+        private Timer pollTimer;
+        private Timer processProbeTimer;
         private bool active;
         private bool disposed;
+        private bool offline;
+        private bool awaitingSnapshotAfterRestart;
         private bool lastReadPaused;
         private string selectedRootId = String.Empty;
         private HaloSettings lastSettings = new HaloSettings();
         private AgentProviderSnapshot lastSnapshot;
         private DeepSeekHarnessReadResult lastRead;
+        private DeepSeekHarnessReadResult offlineRead;
 
         public DeepSeekHarnessAgentProvider()
             : this(new DeepSeekHarnessSnapshotReader())
@@ -62,6 +68,7 @@ internal sealed class DeepSeekHarnessAgentProvider : IAgentProvider
 
         public void Start()
         {
+            bool shouldPoll;
             lock (pollGate)
             {
                 ThrowIfDisposed();
@@ -71,19 +78,20 @@ internal sealed class DeepSeekHarnessAgentProvider : IAgentProvider
                 }
                 lastReadPaused = lastSettings.Paused;
                 active = true;
+                shouldPoll = !offline;
             }
             try
             {
-                Poll(false);
+                if (shouldPoll)
+                {
+                    Poll(false);
+                }
             }
             finally
             {
                 lock (pollGate)
                 {
-                    if (active && !disposed && timer == null)
-                    {
-                        timer = new Timer(OnTimer, null, 1000, 1000);
-                    }
+                    EnsureTimersLocked();
                 }
             }
         }
@@ -99,11 +107,7 @@ internal sealed class DeepSeekHarnessAgentProvider : IAgentProvider
                         return;
                     }
                     active = false;
-                    if (timer != null)
-                    {
-                        timer.Dispose();
-                        timer = null;
-                    }
+                    EnsureTimersLocked();
                 }
             }
         }
@@ -115,6 +119,10 @@ internal sealed class DeepSeekHarnessAgentProvider : IAgentProvider
                 if (!active || disposed)
                 {
                     return false;
+                }
+                if (offline)
+                {
+                    return true;
                 }
             }
             Poll(true);
@@ -203,9 +211,11 @@ internal sealed class DeepSeekHarnessAgentProvider : IAgentProvider
                         return;
                     }
                     disposed = true;
+                    EnsureTimersLocked();
                     Changed = null;
                     lastRead = null;
                     lastSnapshot = null;
+                    offlineRead = null;
                 }
             }
         }
@@ -213,6 +223,89 @@ internal sealed class DeepSeekHarnessAgentProvider : IAgentProvider
         private void OnTimer(object state)
         {
             Poll(true);
+        }
+
+        private void OnProcessProbe(object state)
+        {
+            bool resumeSnapshotPolling = false;
+            bool changed = false;
+            lock (pollGate)
+            {
+                if (disposed || !active || (!offline &&
+                        !awaitingSnapshotAfterRestart) ||
+                    lastSettings.Paused)
+                {
+                    return;
+                }
+
+                DeepSeekHarnessProcessProbeResult result =
+                    snapshotReader.ProbeForRestart();
+                if (offline && result ==
+                    DeepSeekHarnessProcessProbeResult.Found)
+                {
+                    offline = false;
+                    awaitingSnapshotAfterRestart = true;
+                    offlineRead = null;
+                    resumeSnapshotPolling = true;
+                }
+                else if (offline && result ==
+                    DeepSeekHarnessProcessProbeResult.Unknown)
+                {
+                    AgentProviderSnapshot previous = lastSnapshot;
+                    lastRead = CopyReadResult(offlineRead);
+                    if (lastRead != null)
+                    {
+                        lastRead.Broken = true;
+                        lastRead.IntegrationState =
+                            AgentIntegrationState.Broken;
+                        lastRead.StatusDetailKey =
+                            "status.deepseek.unknown";
+                    }
+                    lastSnapshot = BuildFromCache(lastSettings,
+                        DateTime.UtcNow);
+                    changed = DeepSeekHarnessSnapshotReducer.SnapshotChanged(
+                        previous, lastSnapshot);
+                }
+                else if (offline)
+                {
+                    lastRead = offlineRead;
+                    AgentProviderSnapshot previous = lastSnapshot;
+                    lastSnapshot = BuildFromCache(lastSettings,
+                        DateTime.UtcNow);
+                    changed = DeepSeekHarnessSnapshotReducer.SnapshotChanged(
+                        previous, lastSnapshot);
+                }
+                else if (awaitingSnapshotAfterRestart && result ==
+                    DeepSeekHarnessProcessProbeResult.NotFound)
+                {
+                    awaitingSnapshotAfterRestart = false;
+                    if (snapshotReader.CanStopSnapshotPolling(lastRead))
+                    {
+                        EnterOfflineLocked();
+                    }
+                    else
+                    {
+                        EnsureTimersLocked();
+                    }
+                }
+            }
+
+            if (resumeSnapshotPolling)
+            {
+                try
+                {
+                    Poll(true);
+                }
+                finally
+                {
+                    lock (pollGate)
+                    {
+                        EnsureTimersLocked();
+                    }
+                }
+                return;
+            }
+            NotifyChanged(changed);
         }
 
         private void Poll(bool notify)
@@ -229,6 +322,10 @@ internal sealed class DeepSeekHarnessAgentProvider : IAgentProvider
                 {
                     return;
                 }
+                if (offline)
+                {
+                    return;
+                }
                 if (lastSettings.Paused)
                 {
                     return;
@@ -236,12 +333,46 @@ internal sealed class DeepSeekHarnessAgentProvider : IAgentProvider
                 lastReadPaused = false;
                 AgentProviderSnapshot previous = lastSnapshot;
                 lastRead = snapshotReader.Read(nowUtc);
+                if (awaitingSnapshotAfterRestart &&
+                    lastRead.Instances.Count > 0)
+                {
+                    awaitingSnapshotAfterRestart = false;
+                    EnsureTimersLocked();
+                }
+                if (!awaitingSnapshotAfterRestart &&
+                    snapshotReader.CanStopSnapshotPolling(lastRead))
+                {
+                    DeepSeekHarnessProcessProbeResult probeResult =
+                        snapshotReader.ProbeForRestart();
+                    if (probeResult ==
+                        DeepSeekHarnessProcessProbeResult.NotFound)
+                    {
+                        EnterOfflineLocked();
+                    }
+                    else
+                    {
+                        // Keep normal snapshot polling until this known DSH
+                        // process pair either publishes a validated snapshot
+                        // or the low-frequency probe confirms it is gone.
+                        awaitingSnapshotAfterRestart = true;
+                        EnsureTimersLocked();
+                    }
+                }
                 lastSnapshot = BuildFromCache(lastSettings, nowUtc);
                 changed = DeepSeekHarnessSnapshotReducer.SnapshotChanged(
                     previous, lastSnapshot);
             }
 
-            if (!notify || !changed)
+            if (!notify)
+            {
+                return;
+            }
+            NotifyChanged(changed);
+        }
+
+        private void NotifyChanged(bool changed)
+        {
+            if (!changed)
             {
                 return;
             }
@@ -261,6 +392,74 @@ internal sealed class DeepSeekHarnessAgentProvider : IAgentProvider
                     handler(this, EventArgs.Empty);
                 }
             }
+        }
+
+        private void EnterOfflineLocked()
+        {
+            offline = true;
+            offlineRead = CopyReadResult(lastRead);
+            EnsureTimersLocked();
+        }
+
+        private void EnsureTimersLocked()
+        {
+            bool running = active && !disposed;
+            if (running && !offline)
+            {
+                if (pollTimer == null)
+                {
+                    pollTimer = new Timer(OnTimer, null, 1000, 1000);
+                }
+            }
+            else if (pollTimer != null)
+            {
+                pollTimer.Dispose();
+                pollTimer = null;
+            }
+
+            if (running && (offline || awaitingSnapshotAfterRestart))
+            {
+                if (processProbeTimer == null)
+                {
+                    int interval = (int)OfflineProbeInterval.TotalMilliseconds;
+                    processProbeTimer = new Timer(OnProcessProbe, null,
+                        interval, interval);
+                }
+            }
+            else if (processProbeTimer != null)
+            {
+                processProbeTimer.Dispose();
+                processProbeTimer = null;
+            }
+        }
+
+        private static DeepSeekHarnessReadResult CopyReadResult(
+            DeepSeekHarnessReadResult source)
+        {
+            if (source == null)
+            {
+                return null;
+            }
+            DeepSeekHarnessReadResult copy = new DeepSeekHarnessReadResult
+            {
+                IntegrationState = source.IntegrationState,
+                StatusDetailKey = source.StatusDetailKey,
+                LastEventUtc = source.LastEventUtc,
+                FilesPresent = source.FilesPresent,
+                HadStoppedInstance = source.HadStoppedInstance,
+                Unsupported = source.Unsupported,
+                Broken = source.Broken,
+                UnverifiedStoppedInstance =
+                    source.UnverifiedStoppedInstance,
+                ConfirmedExitedInstances = source.ConfirmedExitedInstances
+            };
+            copy.Instances.AddRange(source.Instances);
+            foreach (string instanceId in
+                source.ConfirmedExitedInstanceIds)
+            {
+                copy.ConfirmedExitedInstanceIds.Add(instanceId);
+            }
+            return copy;
         }
 
         private AgentProviderSnapshot BuildFromCache(HaloSettings settings,

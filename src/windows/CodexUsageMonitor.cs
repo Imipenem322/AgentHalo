@@ -136,6 +136,10 @@ public sealed class CodexUsageMonitor : IDisposable
                 }
                 active = false;
                 activationEpoch = NextEpoch(activationEpoch);
+                if (status == CodexUsageDataStatus.Fresh)
+                {
+                    MarkStaleLocked();
+                }
                 refreshTimer.Change(Timeout.InfiniteTimeSpan,
                     Timeout.InfiniteTimeSpan);
                 localSnapshotTimer.Change(Timeout.InfiniteTimeSpan,
@@ -266,6 +270,7 @@ public sealed class CodexUsageMonitor : IDisposable
                 bool changed = false;
                 try
                 {
+                    if (!IsActiveEpoch(requestEpoch)) return;
                     UsageMetrics parsed;
                     bool scanSucceeded;
                     RateLimitReader.TryRead(codexDataRoot, out parsed,
@@ -350,12 +355,11 @@ public sealed class CodexUsageMonitor : IDisposable
                 {
                     string previousAccountKey = access.AccountKey;
                     access = RefreshAccess(access);
-                    if (!IsActiveEpoch(requestEpoch))
+                    if (!MigrateCacheForEpoch(requestEpoch, previousAccountKey,
+                        access.AccountKey))
                     {
                         return;
                     }
-                    CodexUsageSnapshotCache.Migrate(previousAccountKey,
-                        access.AccountKey);
                     if (ObserveAccount(access, requestEpoch))
                     {
                         notify = true;
@@ -373,12 +377,11 @@ public sealed class CodexUsageMonitor : IDisposable
                 {
                     string previousAccountKey = access.AccountKey;
                     access = RefreshAccess(access);
-                    if (!IsActiveEpoch(requestEpoch))
+                    if (!MigrateCacheForEpoch(requestEpoch, previousAccountKey,
+                        access.AccountKey))
                     {
                         return;
                     }
-                    CodexUsageSnapshotCache.Migrate(previousAccountKey,
-                        access.AccountKey);
                     if (ObserveAccount(access, requestEpoch))
                     {
                         notify = true;
@@ -435,23 +438,12 @@ public sealed class CodexUsageMonitor : IDisposable
                     throw new InvalidDataException("invalid usage response");
                 }
                 DateTime refreshedAt = DateTime.UtcNow;
-                if (!IsActiveEpoch(requestEpoch))
+                if (!TryCommitRemoteResult(requestEpoch, access.AccountKey,
+                    mapped, refreshedAt))
                 {
                     return;
                 }
-                CodexUsageSnapshotCache.Store(access.AccountKey, mapped, refreshedAt);
-                lock (gate)
-                {
-                    if (IsActiveEpochLocked(requestEpoch))
-                    {
-                        remoteMetrics = Clone(mapped);
-                        remoteRefreshedUtc = refreshedAt;
-                        remoteAccountKey = access.AccountKey;
-                        status = CodexUsageDataStatus.Fresh;
-                        cooldownUntilUtc = DateTime.MinValue;
-                        notify = true;
-                    }
-                }
+                notify = true;
             }
             catch (Exception ex)
             {
@@ -617,6 +609,39 @@ public sealed class CodexUsageMonitor : IDisposable
                 ? CodexUsageDataStatus.NoData : CodexUsageDataStatus.Stale;
         }
 
+        private bool MigrateCacheForEpoch(long expectedEpoch,
+            string oldAccountKey, string newAccountKey)
+        {
+            lock (gate)
+            {
+                if (!IsActiveEpochLocked(expectedEpoch))
+                {
+                    return false;
+                }
+                CodexUsageSnapshotCache.Migrate(oldAccountKey, newAccountKey);
+                return true;
+            }
+        }
+
+        private bool TryCommitRemoteResult(long expectedEpoch,
+            string accountKey, UsageMetrics metrics, DateTime refreshedUtc)
+        {
+            lock (gate)
+            {
+                if (!IsActiveEpochLocked(expectedEpoch))
+                {
+                    return false;
+                }
+                CodexUsageSnapshotCache.Store(accountKey, metrics, refreshedUtc);
+                remoteMetrics = Clone(metrics);
+                remoteRefreshedUtc = refreshedUtc;
+                remoteAccountKey = accountKey;
+                status = CodexUsageDataStatus.Fresh;
+                cooldownUntilUtc = DateTime.MinValue;
+                return true;
+            }
+        }
+
         private CodexOAuthAccess RefreshAccess(CodexOAuthAccess expected)
         {
             if (String.IsNullOrWhiteSpace(expected.RefreshToken))
@@ -770,7 +795,7 @@ public sealed class CodexUsageMonitor : IDisposable
             return null;
         }
 
-        private static UsageMetrics Merge(UsageMetrics local, UsageMetrics remote,
+        internal static UsageMetrics Merge(UsageMetrics local, UsageMetrics remote,
             DateTime nowUtc)
         {
             UsageMetrics result = Clone(local) ?? new UsageMetrics
@@ -809,12 +834,6 @@ public sealed class CodexUsageMonitor : IDisposable
                 ContextInputTokens = source.ContextInputTokens,
                 ContextWindowTokens = source.ContextWindowTokens
             };
-        }
-
-        internal static UsageMetrics MergeForTest(UsageMetrics local,
-            UsageMetrics remote, DateTime nowUtc)
-        {
-            return Merge(local, remote, nowUtc);
         }
 
         private static bool ShouldUseRemote(bool remoteAvailable, DateTime remoteReset,
@@ -1223,12 +1242,6 @@ public static class CodexUsageResponseMapper
                 metrics = new UsageMetrics { ContextInputTokens = -1 };
                 return false;
             }
-        }
-
-        internal static bool TryMapForTest(string json, DateTime nowUtc,
-            out UsageMetrics metrics)
-        {
-            return TryMap(json, nowUtc, out metrics);
         }
 
         private enum WindowKind

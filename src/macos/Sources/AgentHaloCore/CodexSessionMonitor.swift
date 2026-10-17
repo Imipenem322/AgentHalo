@@ -1,12 +1,15 @@
 import Foundation
 
 public final class CodexSessionMonitor {
+    private static let discoveryInterval: TimeInterval = 10
+
     private let sessionsRoot: URL
     private var reducers: [URL: SessionReducer] = [:]
     private var offsets: [URL: UInt64] = [:]
     private var pending: [URL: Data] = [:]
     private var lastModified: [URL: Date] = [:]
     private var lastDiscoveryAt = Date.distantPast
+    private var lastAgentExitAt: Date?
     private var sessionTitleReader: CodexSessionTitleReader
     private let fileManager: FileManager
 
@@ -23,7 +26,7 @@ public final class CodexSessionMonitor {
 
     public func refresh(now: Date = Date()) -> Bool {
         var changed = false
-        if now.timeIntervalSince(lastDiscoveryAt) >= 2 {
+        if now.timeIntervalSince(lastDiscoveryAt) >= Self.discoveryInterval {
             changed = discover(now: now) || changed
         }
         for url in Array(reducers.keys) {
@@ -45,6 +48,24 @@ public final class CodexSessionMonitor {
         reducers.values.map(\.snapshot)
     }
 
+    public func agentDidExit(
+        at exitTime: Date = Date(),
+        preservingNewerActivity: Bool = false
+    ) {
+        let baseline = max(lastAgentExitAt ?? .distantPast, exitTime)
+        lastAgentExitAt = baseline
+        for url in Array(reducers.keys) {
+            guard var reducer = reducers[url] else {
+                continue
+            }
+            reducer.markAgentExited(
+                at: baseline,
+                preservingNewerActivity: preservingNewerActivity
+            )
+            reducers[url] = reducer
+        }
+    }
+
     private func discover(now: Date) -> Bool {
         lastDiscoveryAt = now
         let cutoff = now.addingTimeInterval(-172_800)
@@ -59,7 +80,11 @@ public final class CodexSessionMonitor {
         let recent = Set(files.sorted { $0.modifiedAt > $1.modifiedAt }.prefix(16).map(\.url))
         var changed = false
         for url in recent where reducers[url] == nil {
-            reducers[url] = SessionReducer(filePath: url.path(percentEncoded: false), liveTracking: false)
+            var reducer = SessionReducer(filePath: url.path(percentEncoded: false), liveTracking: false)
+            if let lastAgentExitAt {
+                reducer.setActivityBaseline(at: lastAgentExitAt)
+            }
+            reducers[url] = reducer
             let initialReadEnd = readInitialTail(from: url)
             let meta = FastFileMetadata.read(url)
             offsets[url] = initialReadEnd ?? 0
@@ -112,7 +137,10 @@ public final class CodexSessionMonitor {
             offsets[url] = 0
             pending[url] = nil
             lastModified[url] = mtime
-            reducers[url] = SessionReducer(filePath: url.path(percentEncoded: false), liveTracking: true)
+            if var reducer = reducers[url] {
+                reducer.resetAfterTruncation(filePath: url.path(percentEncoded: false))
+                reducers[url] = reducer
+            }
             return false
         }
         guard current > previous, let handle = try? FileHandle(forReadingFrom: url) else {

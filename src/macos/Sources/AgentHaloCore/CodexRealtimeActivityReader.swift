@@ -10,16 +10,23 @@ public struct CodexRealtimeActivityReader: Sendable {
         self.logStore = CodexSQLiteLogStore(databaseURL: databaseURL)
     }
 
-    public func readActive(now: Date = Date()) -> CodexRealtimeActivity? {
-        let cutoff = now.addingTimeInterval(-120).timeIntervalSince1970
+    public func readActive(
+        now: Date = Date(),
+        notBefore: Date? = nil
+    ) -> CodexRealtimeActivity? {
+        let cutoff = max(
+            now.addingTimeInterval(-120).timeIntervalSince1970,
+            notBefore?.timeIntervalSince1970 ?? -.infinity
+        )
         // Filter `target='codex_api::sse::responses'` server-side so only SSE
         // response rows are materialized and transferred, instead of reading
         // 512 arbitrary rows of every target and discarding the rest in Swift.
-        // The timestamp cutoff and body-prefix shape check stay in Swift (no
+        // Timestamp precision and body-prefix shape checks stay in Swift (no
         // `ts >=` predicate) so the bounded `order by id desc limit` window —
-        // not a timestamp scan — drives the query plan.
+        // not a timestamp scan — drives the query plan. `ts_nanos` is needed
+        // to distinguish old and new events recorded within the same second.
         let query = """
-        select ts || char(9) || coalesce(target,'') || char(9) || \
+        select ts || char(9) || coalesce(ts_nanos,0) || char(9) || coalesce(target,'') || char(9) || \
         replace(replace(coalesce(feedback_log_body,''),char(10),' '),char(13),' ') from logs \
         where target='codex_api::sse::responses' \
         order by id desc limit 512;
@@ -32,15 +39,19 @@ public struct CodexRealtimeActivityReader: Sendable {
             return nil
         }
         let bodies = rows.compactMap { line -> String? in
-            let parts = line.split(separator: "\t", maxSplits: 2).map(String.init)
-            guard parts.count == 3,
-                  let seconds = TimeInterval(parts[0]),
-                  seconds >= cutoff,
-                  parts[1] == "codex_api::sse::responses",
-                  parts[2].hasPrefix("SSE event: {\"type\":\"response.") else {
+            let parts = line.split(separator: "\t", maxSplits: 3).map(String.init)
+            guard parts.count == 4,
+                  let seconds = Int64(parts[0]),
+                  let nanoseconds = Int64(parts[1]) else {
                 return nil
             }
-            return parts[2]
+            let eventTime = Double(seconds) + Double(nanoseconds) / 1_000_000_000
+            guard eventTime >= cutoff,
+                  parts[2] == "codex_api::sse::responses",
+                  parts[3].hasPrefix("SSE event: {\"type\":\"response.") else {
+                return nil
+            }
+            return parts[3]
         }
         return findActive(in: bodies)
     }

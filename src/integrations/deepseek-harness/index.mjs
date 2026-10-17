@@ -462,8 +462,7 @@ export function apply(ctx) {
 				lastTasks = pruned;
 			}
 		}
-		if (document.tasks.length > MAX_TASKS ||
-			Buffer.byteLength(contents, "utf8") > MAX_SNAPSHOT_BYTES) {
+		if (Buffer.byteLength(contents, "utf8") > MAX_SNAPSHOT_BYTES) {
 			document.baselineReady = false;
 			document.tasks = [];
 			contents = JSON.stringify(document);

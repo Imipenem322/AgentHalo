@@ -241,7 +241,9 @@ public actor UsageMonitoringCoordinator {
     }
 
     private func prepareContext(_ providerID: UsageProviderID) async -> PrepareContext {
-        guard !isCancelling else { return cancellationContext(for: providerID) }
+        guard !isCancelling, !Task.isCancelled else {
+            return cancellationContext(for: providerID)
+        }
         let lifecycleGeneration = cancellationGeneration
         let sequence = nextPrepareSequence(for: providerID)
         guard let provider = providers[providerID] else {

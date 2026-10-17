@@ -102,8 +102,33 @@ public static class Diagnostics
             Environment.SetEnvironmentVariable(
                 "AGENTHALO_DIAGNOSTIC_APP_DIRECTORY",
                 diagnosticAppDirectory);
+            // Keep the environment setup outside the test body's JIT scope:
+            // beforefieldinit stores may otherwise cache paths before isolation.
             try
             {
+                return RunSelfTestCore(outputPath);
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable(
+                    "AGENTHALO_DIAGNOSTIC_APP_DIRECTORY",
+                    previousDiagnosticDirectory);
+                Environment.SetEnvironmentVariable("AGENTHALO_TEST_MODE",
+                    previousTestMode);
+                Environment.SetEnvironmentVariable("CODEX_HOME", previousCodexHome);
+                TryDeleteSelfTestAppDirectory(diagnosticAppDirectory);
+            }
+        }
+
+        private static int RunSelfTestCore(string outputPath)
+        {
+            try
+            {
+                Assert(String.Equals(AgentHaloPaths.CodexDataRootDirectory(),
+                    Path.Combine(Environment.GetEnvironmentVariable(
+                        "AGENTHALO_DIAGNOSTIC_APP_DIRECTORY"), "codex-data"),
+                    StringComparison.OrdinalIgnoreCase),
+                    "self-test Codex data paths stay inside the temporary fixture");
                 string temp = Path.Combine(Path.GetTempPath(), "codex-halo-selftest-" +
                     Guid.NewGuid().ToString("N") + ".jsonl");
                 string id = Guid.NewGuid().ToString();
@@ -968,7 +993,7 @@ public static class Diagnostics
                     "\"limit_window_seconds\":18000,\"reset_after_seconds\":900}," +
                     "\"secondary_window\":{\"used_percent\":61," +
                     "\"limit_window_seconds\":604800,\"reset_after_seconds\":7200}}}";
-                Assert(CodexUsageResponseMapper.TryMapForTest(liveUsage,
+                Assert(CodexUsageResponseMapper.TryMap(liveUsage,
                     DateTime.UtcNow, out parsedUsage) &&
                     parsedUsage.HasFiveHour && parsedUsage.HasWeekly,
                     "OAuth usage response maps both quota windows");
@@ -980,7 +1005,7 @@ public static class Diagnostics
                     "\"primary_window\":{\"used_percent\":17," +
                     "\"limit_window_seconds\":604800," +
                     "\"reset_after_seconds\":3600},\"secondary_window\":null}}";
-                Assert(CodexUsageResponseMapper.TryMapForTest(weeklyPrimaryUsage,
+                Assert(CodexUsageResponseMapper.TryMap(weeklyPrimaryUsage,
                     DateTime.UtcNow, out parsedUsage) && parsedUsage.HasWeekly &&
                     !parsedUsage.HasFiveHour &&
                     Math.Abs(parsedUsage.WeeklyUsedPercent - 17) < 0.001,
@@ -1008,7 +1033,7 @@ public static class Diagnostics
                     WeeklyResetUtc = mergeNow.AddDays(3),
                     ContextInputTokens = -1
                 };
-                UsageMetrics mergedQuota = CodexUsageMonitor.MergeForTest(
+                UsageMetrics mergedQuota = CodexUsageMonitor.Merge(
                     localQuota, remoteQuota, mergeNow);
                 Assert(Math.Abs(mergedQuota.FiveHourUsedPercent - 20) < 0.001 &&
                     Math.Abs(mergedQuota.WeeklyUsedPercent - 30) < 0.001 &&
@@ -1016,19 +1041,19 @@ public static class Diagnostics
                     "live OAuth quota overrides JSONL while JSONL supplies context");
                 mergedQuota.FiveHourUsedPercent = 99;
                 mergedQuota.ContextInputTokens = 0;
-                UsageMetrics rereadQuota = CodexUsageMonitor.MergeForTest(
+                UsageMetrics rereadQuota = CodexUsageMonitor.Merge(
                     localQuota, remoteQuota, mergeNow);
                 Assert(rereadQuota.FiveHourUsedPercent == 20 &&
                     rereadQuota.ContextInputTokens == 50 &&
                     localQuota.FiveHourUsedPercent == 80,
                     "usage merge returns an independent result");
-                UsageMetrics fallbackQuota = CodexUsageMonitor.MergeForTest(
+                UsageMetrics fallbackQuota = CodexUsageMonitor.Merge(
                     localQuota, null, mergeNow);
                 Assert(Math.Abs(fallbackQuota.FiveHourUsedPercent - 80) < 0.001 &&
                     Math.Abs(fallbackQuota.WeeklyUsedPercent - 70) < 0.001,
                     "JSONL quota remains available when OAuth has no snapshot");
                 remoteQuota.FiveHourResetUtc = mergeNow.AddMinutes(-1);
-                UsageMetrics expiredRemoteQuota = CodexUsageMonitor.MergeForTest(
+                UsageMetrics expiredRemoteQuota = CodexUsageMonitor.Merge(
                     localQuota, remoteQuota, mergeNow);
                 Assert(Math.Abs(expiredRemoteQuota.FiveHourUsedPercent - 80) < 0.001,
                     "expired OAuth window does not replace a current JSONL fallback");
@@ -1333,6 +1358,46 @@ public static class Diagnostics
                             AgentEvidenceSource.SessionJsonl,
                         "session watcher discovers a new active turn incrementally");
 
+                    File.AppendAllText(watcherSession,
+                        "{\"timestamp\":\"" + DateTime.UtcNow.ToString("o") +
+                        "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\"}}\n");
+                    watcherDeadline = DateTime.UtcNow.AddSeconds(3);
+                    while (DateTime.UtcNow < watcherDeadline)
+                    {
+                        watcherAggregate = watcherMonitor.GetAggregate(presenceSettings, true);
+                        if (watcherAggregate.State == HaloState.Done) break;
+                        Thread.Sleep(50);
+                    }
+                    Assert(watcherAggregate.State == HaloState.Done,
+                        "session watcher refreshes an already tracked file after append");
+
+                    System.Reflection.BindingFlags watcherFlags =
+                        System.Reflection.BindingFlags.Instance |
+                        System.Reflection.BindingFlags.NonPublic;
+                    FileSystemWatcher mutedWatcher = (FileSystemWatcher)
+                        typeof(CodexSessionMonitor).GetField("sessionWatcher", watcherFlags)
+                            .GetValue(watcherMonitor);
+                    mutedWatcher.EnableRaisingEvents = false;
+                    string recoveredPath = Path.Combine(watcherRoot, "recovered.jsonl");
+                    File.WriteAllText(recoveredPath,
+                        "{\"type\":\"session_meta\",\"payload\":{\"cwd\":\"C:\\\\work\\\\recovered\"}}\n",
+                        new UTF8Encoding(false));
+                    typeof(CodexSessionMonitor).GetMethod("OnSessionWatcherError", watcherFlags)
+                        .Invoke(watcherMonitor, new object[] { mutedWatcher,
+                            new ErrorEventArgs(new InternalBufferOverflowException()) });
+                    watcherDeadline = DateTime.UtcNow.AddSeconds(3);
+                    bool recoveredFileFound = false;
+                    while (DateTime.UtcNow < watcherDeadline)
+                    {
+                        recoveredFileFound = watcherMonitor.GetAllRecent().Any(
+                            delegate(SessionSnapshot snapshot)
+                            { return snapshot.ProjectName == "recovered"; });
+                        if (recoveredFileFound) break;
+                        Thread.Sleep(50);
+                    }
+                    Assert(recoveredFileFound,
+                        "watcher overflow rebuilds discovery and recovers a missed session");
+
                     watcherMonitor.Stop();
                     string pausedWatcherSession = Path.Combine(watcherRoot,
                         "rollout-paused-" + Guid.NewGuid().ToString() + ".jsonl");
@@ -1375,6 +1440,7 @@ public static class Diagnostics
                 RunDeepSeekIntegrationStateChecks();
                 RunCodexLogReviewChecks();
                 RunCodexAccountBoundaryChecks();
+                RunCodexUsageCommitBoundaryChecks();
                 File.Delete(temp);
                 File.WriteAllText(outputPath,
                     "PASS\nLifecycle, Codex and DSH provider coordination, DSH automatic setup and task details, topmost guard, usage metrics, panel formatting, and animation checks passed.\n",
@@ -1385,16 +1451,6 @@ public static class Diagnostics
             {
                 File.WriteAllText(outputPath, "FAIL\n" + ex.ToString(), Encoding.UTF8);
                 return 1;
-            }
-            finally
-            {
-                Environment.SetEnvironmentVariable(
-                    "AGENTHALO_DIAGNOSTIC_APP_DIRECTORY",
-                    previousDiagnosticDirectory);
-                Environment.SetEnvironmentVariable("AGENTHALO_TEST_MODE",
-                    previousTestMode);
-                Environment.SetEnvironmentVariable("CODEX_HOME", previousCodexHome);
-                TryDeleteSelfTestAppDirectory(diagnosticAppDirectory);
             }
         }
 
@@ -1412,6 +1468,7 @@ public static class Diagnostics
                 VerifySplitUtf8AndReplacement(sessionRoot);
                 VerifyQuotaScanAndInvalidation(quotaRoot, quotaSessions);
                 VerifySqliteQueryFailure(root);
+                VerifyCodexOfflineRecovery(sessionRoot);
             }
             finally
             {
@@ -1507,6 +1564,260 @@ public static class Diagnostics
             Assert(RateLimitReader.TryRead(root, out metrics, out scanSucceeded) &&
                 scanSucceeded && metrics.WeeklyUsedPercent == 72,
                 "same-size replacement did not invalidate quota cache");
+
+            string newer = Path.Combine(sessions, "newer.jsonl");
+            File.WriteAllText(newer, valid.Replace("\"used_percent\":37",
+                "\"used_percent\":19") + "\n", new UTF8Encoding(false));
+            File.SetLastWriteTimeUtc(newer, stamp.AddSeconds(1));
+            Assert(RateLimitReader.TryRead(root, out metrics, out scanSucceeded) &&
+                scanSucceeded && metrics.WeeklyUsedPercent == 72,
+                "unchanged quota candidates do not rediscover the directory every refresh");
+            RateLimitReader.InvalidateCachedPath(newer);
+            Assert(RateLimitReader.TryRead(root, out metrics, out scanSucceeded) &&
+                scanSucceeded && metrics.WeeklyUsedPercent == 19,
+                "file events add a newer quota candidate before periodic discovery");
+            File.Delete(newer);
+            RateLimitReader.InvalidateCachedPath(newer);
+            Assert(RateLimitReader.TryRead(root, out metrics, out scanSucceeded) &&
+                scanSucceeded && metrics.WeeklyUsedPercent == 72,
+                "deleting the newest candidate restores the previous quota file");
+
+            string archive = Path.Combine(root, "archived_sessions");
+            Directory.CreateDirectory(archive);
+            File.WriteAllText(Path.Combine(archive, "archived.jsonl"),
+                valid.Replace("\"used_percent\":37", "\"used_percent\":45") +
+                    "\n", new UTF8Encoding(false));
+            RateLimitReader.InvalidateCandidates();
+            Assert(RateLimitReader.TryRead(root, out metrics, out scanSucceeded) &&
+                scanSucceeded && metrics.WeeklyUsedPercent == 45,
+                "candidate calibration discovers archived files without watcher events");
+        }
+
+        private static void VerifyCodexOfflineRecovery(string sessions)
+        {
+            string path = Path.Combine(sessions, "offline.jsonl");
+            string started = "{\"timestamp\":\"" + DateTime.UtcNow.ToString("o") +
+                "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n";
+            File.WriteAllText(path, started, new UTF8Encoding(false));
+            DateTime initialProcessStartedUtc = DateTime.UtcNow.AddMinutes(-2);
+            DateTime restartedProcessStartedUtc = DateTime.MinValue;
+            DateTime replacementProcessStartedUtc = DateTime.MinValue;
+            DateTime newProcessStartedUtc = DateTime.MinValue;
+            string sqlitePath = Path.Combine(AgentHaloPaths.CodexDataRootDirectory(),
+                "logs_2.sqlite");
+            InsertCodexRealtimeLog(sqlitePath,
+                initialProcessStartedUtc.AddMinutes(1),
+                "SSE event: {\"type\":\"response.output_text.delta\",\"delta\":\"old response\"}");
+            System.Reflection.BindingFlags flags = System.Reflection.BindingFlags.Instance |
+                System.Reflection.BindingFlags.NonPublic;
+            CodexUsageMonitor quota = (CodexUsageMonitor)typeof(CodexUsageMonitor)
+                .GetConstructor(flags, null, Type.EmptyTypes, null).Invoke(null);
+            CodexSessionMonitor monitor = new CodexSessionMonitor(sessions, true);
+            int processState = 1;
+            using (quota)
+            using (CodexAgentProvider provider = new CodexAgentProvider(monitor,
+                quota, delegate { return processState == 2 ? null : processState == 0
+                    ? new string[0] : new[] { processState.ToString(CultureInfo.InvariantCulture) +
+                        ":" + (processState == 1 ? initialProcessStartedUtc :
+                            processState == 5 ? restartedProcessStartedUtc :
+                            processState == 3 ? replacementProcessStartedUtc :
+                            newProcessStartedUtc).Ticks.ToString(
+                                CultureInfo.InvariantCulture) }; }))
+            {
+                HaloSettings settings = new HaloSettings();
+                System.Reflection.MethodInfo tick = typeof(CodexSessionMonitor)
+                    .GetMethod("OnTick", flags);
+                System.Reflection.MethodInfo probe = typeof(CodexAgentProvider)
+                    .GetMethod("PollProcess", flags);
+                provider.Start();
+                tick.Invoke(monitor, new object[] { null });
+                DateTime deadline = DateTime.UtcNow.AddSeconds(3);
+                while (provider.Read(settings, DateTime.UtcNow).Aggregate.EvidenceSource !=
+                    AgentEvidenceSource.DiagnosticSqlite && DateTime.UtcNow < deadline)
+                {
+                    Thread.Sleep(25);
+                }
+                AggregateSnapshot initialSnapshot = provider.Read(settings,
+                    DateTime.UtcNow).Aggregate;
+                Assert(initialSnapshot.State == HaloState.Working &&
+                    initialSnapshot.EvidenceSource == AgentEvidenceSource.DiagnosticSqlite,
+                    "Codex online fixture reads active SQLite SSE evidence");
+                long oldEpoch = (long)typeof(CodexAgentProvider)
+                    .GetField("usageActivationEpoch", flags).GetValue(provider);
+
+                processState = 0;
+                probe.Invoke(provider, new object[] { null });
+                tick.Invoke(monitor, new object[] { null });
+                Assert(provider.Read(settings, DateTime.UtcNow).Aggregate.Presence ==
+                    AgentPresenceState.Offline && !(bool)typeof(CodexUsageMonitor)
+                    .GetField("active", flags).GetValue(quota),
+                    "Codex exit stops sessions and automatic quota collection");
+                processState = 2;
+                probe.Invoke(provider, new object[] { null });
+                Assert(provider.Read(settings, DateTime.UtcNow).Aggregate.Presence ==
+                    AgentPresenceState.Offline,
+                    "unavailable process information does not invent a Codex restart");
+
+                DateTime lateOldEventUtc = DateTime.UtcNow;
+                InsertCodexRealtimeLog(sqlitePath, lateOldEventUtc,
+                    "SSE event: {\"type\":\"response.output_text.delta\",\"delta\":\"late old response\"}");
+                restartedProcessStartedUtc = lateOldEventUtc.AddTicks(1);
+                processState = 5;
+                probe.Invoke(provider, new object[] { null });
+                tick.Invoke(monitor, new object[] { null });
+                Assert(provider.Read(settings, DateTime.UtcNow).Aggregate.Presence ==
+                    AgentPresenceState.Standby && !(bool)typeof(CodexUsageMonitor)
+                    .GetMethod("IsActiveEpoch", flags).Invoke(quota, new object[] { oldEpoch }),
+                    "Codex restart rejects prior SQLite evidence and the old quota epoch");
+
+                InsertCodexRealtimeLog(sqlitePath, DateTime.UtcNow,
+                    "SSE event: {\"type\":\"response.output_text.delta\",\"delta\":\"new response\"}");
+                tick.Invoke(monitor, new object[] { null });
+                deadline = DateTime.UtcNow.AddSeconds(3);
+                while (provider.Read(settings, DateTime.UtcNow).Aggregate.EvidenceSource !=
+                    AgentEvidenceSource.DiagnosticSqlite && DateTime.UtcNow < deadline)
+                {
+                    Thread.Sleep(25);
+                }
+                AggregateSnapshot sqliteRecovery = provider.Read(settings,
+                    DateTime.UtcNow).Aggregate;
+                Assert(sqliteRecovery.State == HaloState.Working &&
+                    sqliteRecovery.EvidenceSource == AgentEvidenceSource.DiagnosticSqlite,
+                    "new SQLite SSE evidence restores activity within the restarted process lifecycle");
+
+                InsertCodexRealtimeLog(sqlitePath, DateTime.UtcNow,
+                    "SSE event: {\"type\":\"response.completed\"}");
+                tick.Invoke(monitor, new object[] { null });
+
+                DateTime resumedTaskUtc = DateTime.UtcNow;
+                File.AppendAllText(path, "{\"timestamp\":\"" + resumedTaskUtc.ToString("o") +
+                    "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n");
+                deadline = DateTime.UtcNow.AddSeconds(3);
+                while (provider.Read(settings, DateTime.UtcNow).Aggregate.State !=
+                    HaloState.Thinking && DateTime.UtcNow < deadline)
+                {
+                    Thread.Sleep(25);
+                }
+                Assert(provider.Read(settings, DateTime.UtcNow).Aggregate.State ==
+                    HaloState.Thinking, "new turn evidence restores Codex monitoring after restart");
+
+                replacementProcessStartedUtc = resumedTaskUtc.AddTicks(1);
+                processState = 3;
+                probe.Invoke(provider, new object[] { null });
+                tick.Invoke(monitor, new object[] { null });
+                Assert(provider.Read(settings, DateTime.UtcNow).Aggregate.Presence ==
+                    AgentPresenceState.Standby,
+                    "a new process identity resets the old turn even without an observed offline tick");
+
+                newProcessStartedUtc = DateTime.UtcNow;
+                File.AppendAllText(path, "{\"timestamp\":\"" + newProcessStartedUtc.AddTicks(1).ToString("o") +
+                    "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n");
+                deadline = DateTime.UtcNow.AddSeconds(3);
+                while (provider.Read(settings, DateTime.UtcNow).Aggregate.State !=
+                    HaloState.Thinking && DateTime.UtcNow < deadline)
+                {
+                    Thread.Sleep(25);
+                }
+                processState = 4;
+                probe.Invoke(provider, new object[] { null });
+                tick.Invoke(monitor, new object[] { null });
+                Assert(provider.Read(settings, DateTime.UtcNow).Aggregate.State ==
+                    HaloState.Thinking,
+                    "rapid restart preserves task evidence already written after the new process start");
+
+                provider.Stop();
+                probe.Invoke(provider, new object[] { null });
+                Assert(!(bool)typeof(CodexUsageMonitor).GetField("active", flags)
+                    .GetValue(quota) && !(bool)typeof(CodexSessionMonitor)
+                    .GetField("started", flags).GetValue(monitor),
+                    "manual stop cannot be undone by a queued process probe");
+            }
+            using (CodexUsageMonitor unknownQuota = (CodexUsageMonitor)
+                typeof(CodexUsageMonitor).GetConstructor(flags, null,
+                    Type.EmptyTypes, null).Invoke(null))
+            using (CodexAgentProvider unknown = new CodexAgentProvider(
+                new CodexSessionMonitor(sessions, false), unknownQuota,
+                delegate { return null; }))
+            {
+                unknown.Start();
+                AgentProviderSnapshot snapshot = unknown.Read(new HaloSettings(), DateTime.UtcNow);
+                Assert(snapshot.Aggregate.Label == "UNKNOWN" &&
+                    snapshot.Aggregate.State == HaloState.Idle,
+                    "initially unavailable process information cannot present an old turn as Working");
+            }
+        }
+
+        private static void InsertCodexRealtimeLog(string databasePath,
+            DateTime timestampUtc, string feedbackLogBody)
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(databasePath));
+            System.Reflection.BindingFlags flags = System.Reflection.BindingFlags.Static |
+                System.Reflection.BindingFlags.NonPublic;
+            object[] openArgs = { Encoding.UTF8.GetBytes(databasePath + "\0"),
+                IntPtr.Zero, 6, null };
+            int opened = (int)typeof(CodexSQLiteLogStore)
+                .GetMethod("sqlite3_open_v2", flags).Invoke(null, openArgs);
+            if (opened != 0 || (IntPtr)openArgs[1] == IntPtr.Zero)
+            {
+                throw new InvalidOperationException(
+                    "Could not open the temporary Codex SSE database.");
+            }
+            IntPtr database = (IntPtr)openArgs[1];
+            try
+            {
+                ExecuteSqliteStatement(database,
+                    "create table if not exists logs (" +
+                    "id integer primary key autoincrement, ts integer not null, " +
+                    "ts_nanos integer not null default 0, target text, " +
+                    "feedback_log_body text);", flags);
+                DateTime utc = timestampUtc.ToUniversalTime();
+                long seconds = new DateTimeOffset(utc).ToUnixTimeSeconds();
+                long nanos = (utc.Ticks - DateTimeOffset.FromUnixTimeSeconds(
+                    seconds).UtcDateTime.Ticks) * 100L;
+                string escapedBody = (feedbackLogBody ?? String.Empty)
+                    .Replace("'", "''");
+                ExecuteSqliteStatement(database,
+                    "insert into logs (ts,ts_nanos,target,feedback_log_body) values (" +
+                    seconds.ToString(CultureInfo.InvariantCulture) + "," +
+                    nanos.ToString(CultureInfo.InvariantCulture) + "," +
+                    "'codex_api::sse::responses','" + escapedBody + "');", flags);
+            }
+            finally
+            {
+                typeof(CodexSQLiteLogStore).GetMethod("sqlite3_close", flags)
+                    .Invoke(null, new object[] { database });
+            }
+        }
+
+        private static void ExecuteSqliteStatement(IntPtr database,
+            string sql, System.Reflection.BindingFlags flags)
+        {
+            object[] prepareArgs = { database, sql, -1, IntPtr.Zero, IntPtr.Zero };
+            int prepared = (int)typeof(CodexSQLiteLogStore)
+                .GetMethod("sqlite3_prepare_v2", flags).Invoke(null, prepareArgs);
+            IntPtr statement = (IntPtr)prepareArgs[3];
+            if (prepared != 0 || statement == IntPtr.Zero)
+            {
+                throw new InvalidOperationException(
+                    "Could not prepare a temporary Codex SSE database statement.");
+            }
+            try
+            {
+                int step = (int)typeof(CodexSQLiteLogStore)
+                    .GetMethod("sqlite3_step", flags)
+                    .Invoke(null, new object[] { statement });
+                if (step != 101)
+                {
+                    throw new InvalidOperationException(
+                        "Could not write a temporary Codex SSE database row: SQLite " +
+                        step.ToString(CultureInfo.InvariantCulture));
+                }
+            }
+            finally
+            {
+                typeof(CodexSQLiteLogStore).GetMethod("sqlite3_finalize", flags)
+                    .Invoke(null, new object[] { statement });
+            }
         }
 
         private static void VerifySqliteQueryFailure(string root)
@@ -1599,6 +1910,105 @@ public static class Diagnostics
                     "partial B quota restores B data while missing buckets stay unattributed");
             }
             File.Delete(authPath);
+        }
+
+        private static void RunCodexUsageCommitBoundaryChecks()
+        {
+            const string accountKey = "synthetic-commit";
+            const string oldAccountKey = "synthetic-commit-before-refresh";
+            System.Reflection.BindingFlags flags = System.Reflection.BindingFlags.Instance |
+                System.Reflection.BindingFlags.NonPublic;
+            System.Reflection.FieldInfo activeField = typeof(CodexUsageMonitor)
+                .GetField("active", flags);
+            System.Reflection.FieldInfo epochField = typeof(CodexUsageMonitor)
+                .GetField("activationEpoch", flags);
+            System.Reflection.MethodInfo isActive = typeof(CodexUsageMonitor)
+                .GetMethod("IsActiveEpoch", flags);
+            System.Reflection.MethodInfo commit = typeof(CodexUsageMonitor)
+                .GetMethod("TryCommitRemoteResult", flags);
+            System.Reflection.MethodInfo migrate = typeof(CodexUsageMonitor)
+                .GetMethod("MigrateCacheForEpoch", flags);
+            DateTime newAt = DateTime.UtcNow;
+            DateTime oldAt = newAt.AddSeconds(-1);
+            UsageMetrics oldMetrics;
+            UsageMetrics newMetrics = null;
+            Assert(CodexUsageResponseMapper.TryMap(
+                "{\"rate_limit\":{\"primary_window\":{\"used_percent\":83," +
+                "\"limit_window_seconds\":18000,\"reset_after_seconds\":900}}}",
+                oldAt, out oldMetrics) && CodexUsageResponseMapper.TryMap(
+                "{\"rate_limit\":{\"primary_window\":{\"used_percent\":17," +
+                "\"limit_window_seconds\":18000,\"reset_after_seconds\":900}}}",
+                newAt, out newMetrics), "controlled quota responses map successfully");
+
+            using (CodexUsageMonitor monitor = (CodexUsageMonitor)
+                typeof(CodexUsageMonitor).GetConstructor(flags, null,
+                    Type.EmptyTypes, null).Invoke(null))
+            using (ManualResetEvent oldChecked = new ManualResetEvent(false))
+            using (ManualResetEvent releaseOld = new ManualResetEvent(false))
+            {
+                // Advance the activation state without starting zero-delay timers
+                // so the fixture only exercises the controlled requests.
+                activeField.SetValue(monitor, true);
+                epochField.SetValue(monitor, 1L);
+                CodexUsageSnapshotCache.Store(oldAccountKey, oldMetrics, oldAt);
+                bool oldWasActive = false;
+                bool oldCommitted = true;
+                bool oldMigrated = true;
+                Exception workerFailure = null;
+                Thread oldRequest = new Thread(delegate()
+                {
+                    try
+                    {
+                        oldWasActive = (bool)isActive.Invoke(monitor, new object[] { 1L });
+                        oldChecked.Set();
+                        if (!releaseOld.WaitOne(3000))
+                        {
+                            throw new InvalidOperationException("old quota request was not released");
+                        }
+                        oldCommitted = (bool)commit.Invoke(monitor,
+                            new object[] { 1L, accountKey, oldMetrics, oldAt });
+                        oldMigrated = (bool)migrate.Invoke(monitor,
+                            new object[] { 1L, oldAccountKey, accountKey });
+                    }
+                    catch (Exception ex)
+                    {
+                        workerFailure = ex;
+                        oldChecked.Set();
+                    }
+                });
+                oldRequest.IsBackground = true;
+                oldRequest.Start();
+                try
+                {
+                    Assert(oldChecked.WaitOne(3000) && oldWasActive,
+                        "old quota request passes its initial epoch check");
+                    monitor.Deactivate(1L);
+                    long newEpoch = (long)epochField.GetValue(monitor) + 1;
+                    epochField.SetValue(monitor, newEpoch);
+                    activeField.SetValue(monitor, true);
+                    Assert((bool)commit.Invoke(monitor,
+                        new object[] { newEpoch, accountKey, newMetrics, newAt }),
+                        "new quota request commits after reactivation");
+                }
+                finally
+                {
+                    releaseOld.Set();
+                    Assert(oldRequest.Join(3000), "controlled old quota request finishes");
+                }
+                Assert(workerFailure == null && !oldCommitted && !oldMigrated,
+                    "late quota result and migration cannot commit after deactivation");
+                UsageMetrics cached;
+                DateTime cachedAt;
+                Assert(CodexUsageSnapshotCache.TryLoad(accountKey, out cached, out cachedAt) &&
+                    cached.HasFiveHour && cached.FiveHourUsedPercent == 17 && cachedAt == newAt,
+                    "late old quota request cannot roll back the disk snapshot");
+                UsageMetrics current;
+                Assert(monitor.TryReadCached(out current) && current.HasFiveHour &&
+                    current.FiveHourUsedPercent == 17 && monitor.Status == CodexUsageDataStatus.Fresh &&
+                    (DateTime)typeof(CodexUsageMonitor).GetField("remoteRefreshedUtc", flags)
+                        .GetValue(monitor) == newAt,
+                    "late old quota request cannot roll back the in-memory snapshot");
+            }
         }
 
         private static void RunDeepSeekAutomaticSetupChecks()
@@ -1895,6 +2305,158 @@ public static class Diagnostics
                     progressed.Instances[0].Fresh &&
                     progressed.Instances[0].Document.revision == 2,
                     "DSH higher revision restores freshness");
+
+                File.Delete(snapshotPath);
+                string replacementPath = Path.Combine(runtime, "replacement-instance.json");
+                File.WriteAllText(replacementPath,
+                    CreateDshReviewSnapshot(runtime, staleUtc, 1)
+                        .Replace("review-instance", "replacement-instance"),
+                    new UTF8Encoding(false));
+                DeepSeekHarnessReadResult replaced = reader.Read(staleUtc, staleTicks + 2);
+                Assert(replaced.Instances.Count == 1 &&
+                    replaced.Instances[0].Document.instanceId == "replacement-instance" &&
+                    !replaced.HadStoppedInstance && !replaced.Broken,
+                    "a replacement snapshot from the same DSH host removes the old cached instance");
+                File.Delete(replacementPath);
+
+                foreach (bool missingDirectory in new[] { false, true })
+                {
+                    File.WriteAllText(snapshotPath, CreateDshReviewSnapshot(runtime,
+                        sampleUtc, 1), new UTF8Encoding(false));
+                    CountingDshProcessValidator cachedValidator =
+                        new CountingDshProcessValidator(sampleUtc.AddHours(-1), 0);
+                    DeepSeekHarnessSnapshotReader cachedReader =
+                        new DeepSeekHarnessSnapshotReader(runtime, cachedValidator);
+                    cachedReader.Read(sampleUtc);
+                    File.Delete(snapshotPath);
+                    if (missingDirectory) Directory.Delete(runtime);
+
+                    DeepSeekHarnessReadResult cached = cachedReader.Read(sampleUtc);
+                    Assert(cached.Instances.Count == 1 && !cached.Instances[0].Fresh &&
+                        cached.LastEventUtc == sampleUtc &&
+                        cached.Instances[0].ParentStartUtc == sampleUtc.AddHours(-1),
+                        "DSH missing snapshot or directory preserves the validated cache as stale");
+                    cachedValidator.Check = DeepSeekHarnessProcessCheck.Exited;
+                    DeepSeekHarnessReadResult singleExit = cachedReader.Read(sampleUtc);
+                    Assert(singleExit.HadStoppedInstance && singleExit.Instances.Count == 0 &&
+                        singleExit.ConfirmedExitedInstances == 0 &&
+                        !cachedReader.CanStopSnapshotPolling(singleExit),
+                        "one missing cached DSH process does not confirm exit");
+                    cachedValidator.Check = DeepSeekHarnessProcessCheck.Unavailable;
+                    DeepSeekHarnessReadResult unknown = cachedReader.Read(sampleUtc);
+                    Assert(unknown.Broken && unknown.ConfirmedExitedInstances == 0 &&
+                        !cachedReader.CanStopSnapshotPolling(unknown),
+                        "unknown cached DSH identity cannot confirm exit");
+                    cachedValidator.Check = DeepSeekHarnessProcessCheck.Valid;
+                    Assert(cachedReader.Read(sampleUtc).Instances.Count == 1,
+                        "single-process exit and unknown identity retain the DSH cache for recovery");
+                    cachedValidator.Check = DeepSeekHarnessProcessCheck.Exited;
+                    cachedValidator.BothProcessesExited = true;
+                    DeepSeekHarnessReadResult bothExited = cachedReader.Read(sampleUtc);
+                    Assert(bothExited.HadStoppedInstance && bothExited.Instances.Count == 0 &&
+                        bothExited.ConfirmedExitedInstances == 1 &&
+                        bothExited.ConfirmedExitedInstanceIds.Contains("review-instance") &&
+                        cachedReader.CanStopSnapshotPolling(bothExited),
+                        "both cached DSH processes exiting confirms the instance once");
+                    cachedValidator.Check = DeepSeekHarnessProcessCheck.Valid;
+                    Assert(cachedReader.Read(sampleUtc).Instances.Count == 0,
+                        "confirmed DSH exit removes the cached instance");
+                    Directory.CreateDirectory(runtime);
+                }
+
+                File.WriteAllText(snapshotPath, CreateDshReviewSnapshot(runtime,
+                    DateTime.UtcNow, 3), new UTF8Encoding(false));
+                CountingDshProcessValidator exitValidator =
+                    new CountingDshProcessValidator(sampleUtc.AddHours(-1), 0);
+                ControlledDshProcessProbe processProbe = new ControlledDshProcessProbe();
+                using (DeepSeekHarnessAgentProvider lifecycle = new DeepSeekHarnessAgentProvider(
+                    new DeepSeekHarnessSnapshotReader(runtime, exitValidator, processProbe)))
+                {
+                    System.Reflection.BindingFlags flags = System.Reflection.BindingFlags.Instance |
+                        System.Reflection.BindingFlags.NonPublic;
+                    System.Reflection.MethodInfo probe = typeof(DeepSeekHarnessAgentProvider)
+                        .GetMethod("OnProcessProbe", flags);
+                    System.Reflection.FieldInfo offline = typeof(DeepSeekHarnessAgentProvider)
+                        .GetField("offline", flags);
+                    lifecycle.Start();
+                    AssertDshTimers(lifecycle, true, false);
+                    int startedCalls = exitValidator.Calls;
+                    lifecycle.Start();
+                    Assert(exitValidator.Calls == startedCalls,
+                        "repeated DSH Start does not poll again");
+                    exitValidator.Check = DeepSeekHarnessProcessCheck.Exited;
+                    lifecycle.Refresh();
+                    Assert(!(bool)offline.GetValue(lifecycle),
+                        "one missing DSH PID cannot stop normal snapshot collection");
+                    exitValidator.Check = DeepSeekHarnessProcessCheck.Unavailable;
+                    lifecycle.Refresh();
+                    Assert(!(bool)offline.GetValue(lifecycle),
+                        "unreadable DSH process identity cannot establish exit");
+
+                    exitValidator.Check = DeepSeekHarnessProcessCheck.Exited;
+                    exitValidator.BothProcessesExited = true;
+                    lifecycle.Refresh();
+                    Assert((bool)offline.GetValue(lifecycle),
+                        "confirmed DSH host and parent exit switches to process-only monitoring");
+                    AssertDshTimers(lifecycle, false, true);
+                    int offlineCalls = exitValidator.Calls;
+                    lifecycle.Read(new HaloSettings(), DateTime.UtcNow);
+                    lifecycle.Refresh();
+                    probe.Invoke(lifecycle, new object[] { null });
+                    Assert(exitValidator.Calls == offlineCalls,
+                        "offline DSH Read, Refresh and process probes do not read snapshot files");
+
+                    processProbe.Result = DeepSeekHarnessProcessProbeResult.Unknown;
+                    probe.Invoke(lifecycle, new object[] { null });
+                    Assert((bool)offline.GetValue(lifecycle) && exitValidator.Calls == offlineCalls,
+                        "unknown DSH restart identity preserves process-only monitoring");
+                    HaloSettings paused = new HaloSettings { Paused = true };
+                    lifecycle.Read(paused, DateTime.UtcNow);
+                    int pausedProbeCalls = processProbe.Calls;
+                    probe.Invoke(lifecycle, new object[] { null });
+                    Assert(processProbe.Calls == pausedProbeCalls,
+                        "DSH manual pause blocks automatic recovery probes");
+                    paused.Paused = false;
+                    lifecycle.Read(paused, DateTime.UtcNow);
+                    lifecycle.Stop();
+                    AssertDshTimers(lifecycle, false, false);
+                    processProbe.Result = DeepSeekHarnessProcessProbeResult.Found;
+                    probe.Invoke(lifecycle, new object[] { null });
+                    Assert(processProbe.Calls == pausedProbeCalls,
+                        "stopped DSH provider cannot be restarted by a queued probe");
+
+                    lifecycle.Start();
+                    probe.Invoke(lifecycle, new object[] { null });
+                    AssertDshTimers(lifecycle, true, true);
+                    processProbe.Result = DeepSeekHarnessProcessProbeResult.NotFound;
+                    probe.Invoke(lifecycle, new object[] { null });
+                    Assert((bool)offline.GetValue(lifecycle),
+                        "DSH restart that exits before publishing a snapshot returns offline");
+                    AssertDshTimers(lifecycle, false, true);
+                    processProbe.Result = DeepSeekHarnessProcessProbeResult.Found;
+                    probe.Invoke(lifecycle, new object[] { null });
+                    AssertDshTimers(lifecycle, true, true);
+                    exitValidator.Check = DeepSeekHarnessProcessCheck.Valid;
+                    exitValidator.CurrentHostPid = 50001;
+                    File.WriteAllText(Path.Combine(runtime, "new-instance.json"),
+                        CreateDshReviewSnapshot(runtime, DateTime.UtcNow, 1)
+                            .Replace("review-instance", "new-instance")
+                            .Replace("\"hostPid\":40001", "\"hostPid\":50001")
+                            .Replace("\"hostParentPid\":40002", "\"hostParentPid\":50002"),
+                        new UTF8Encoding(false));
+                    lifecycle.Refresh();
+                    Assert(!(bool)offline.GetValue(lifecycle) &&
+                        lifecycle.Read(new HaloSettings(), DateTime.UtcNow).Sessions.Count > 0,
+                        "new DSH process and snapshot restore monitoring with a new revision baseline");
+                    AssertDshTimers(lifecycle, true, false);
+                    exitValidator.Check = DeepSeekHarnessProcessCheck.Exited;
+                    processProbe.Result = DeepSeekHarnessProcessProbeResult.NotFound;
+                    lifecycle.Refresh();
+                    Assert((bool)offline.GetValue(lifecycle),
+                        "previously verified old snapshot files do not block the next DSH exit");
+                    lifecycle.Dispose();
+                    AssertDshTimers(lifecycle, false, false);
+                }
             }
             finally
             {
@@ -1903,6 +2465,17 @@ public static class Diagnostics
                     Directory.Delete(root, true);
                 }
             }
+        }
+
+        private static void AssertDshTimers(DeepSeekHarnessAgentProvider provider,
+            bool polling, bool probing)
+        {
+            System.Reflection.BindingFlags flags = System.Reflection.BindingFlags.Instance |
+                System.Reflection.BindingFlags.NonPublic;
+            Type type = typeof(DeepSeekHarnessAgentProvider);
+            Assert((type.GetField("pollTimer", flags).GetValue(provider) != null) == polling &&
+                (type.GetField("processProbeTimer", flags).GetValue(provider) != null) == probing,
+                "DSH timer lifecycle: snapshot polling=" + polling + ", process probing=" + probing);
         }
 
         private static string CreateDshReviewSnapshot(string runtime,
@@ -1995,6 +2568,9 @@ public static class Diagnostics
             private int calls;
             private readonly DateTime parentStartUtc;
             private readonly int firstCallDelayMilliseconds;
+            public DeepSeekHarnessProcessCheck Check = DeepSeekHarnessProcessCheck.Valid;
+            public bool BothProcessesExited;
+            public int CurrentHostPid = 40001;
 
             public int Calls
             {
@@ -2018,9 +2594,27 @@ public static class Diagnostics
                 }
                 return new DeepSeekHarnessProcessValidation
                 {
-                    Check = DeepSeekHarnessProcessCheck.Valid,
-                    ParentStartUtc = parentStartUtc
+                    Check = Check == DeepSeekHarnessProcessCheck.Valid &&
+                        document.hostPid != CurrentHostPid
+                        ? DeepSeekHarnessProcessCheck.Exited : Check,
+                    BothProcessesExited = BothProcessesExited ||
+                        (Check == DeepSeekHarnessProcessCheck.Valid && document.hostPid != CurrentHostPid),
+                    ParentStartUtc = parentStartUtc,
+                    HostProcessName = "synthetic-node",
+                    ParentProcessName = "synthetic-node"
                 };
+            }
+        }
+
+        private sealed class ControlledDshProcessProbe : IDeepSeekHarnessProcessProbe
+        {
+            public DeepSeekHarnessProcessProbeResult Result = DeepSeekHarnessProcessProbeResult.NotFound;
+            public int Calls;
+
+            public DeepSeekHarnessProcessProbeResult Probe(IList<DeepSeekHarnessProcessIdentity> identities)
+            {
+                Calls++;
+                return Result;
             }
         }
 

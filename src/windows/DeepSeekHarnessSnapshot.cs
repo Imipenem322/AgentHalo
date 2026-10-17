@@ -4,6 +4,8 @@ using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Web.Script.Serialization;
 
@@ -92,6 +94,31 @@ internal sealed class DeepSeekHarnessProcessValidation
     {
         public DeepSeekHarnessProcessCheck Check;
         public DateTime ParentStartUtc;
+        public bool BothProcessesExited;
+        public string HostProcessName;
+        public string ParentProcessName;
+    }
+
+internal sealed class DeepSeekHarnessProcessIdentity
+    {
+        public string HostExecutable;
+        public string HostProcessName;
+        public string ParentProcessName;
+        public string HostProfileDir;
+        public string HostRuntimeDir;
+    }
+
+internal enum DeepSeekHarnessProcessProbeResult
+    {
+        Found,
+        NotFound,
+        Unknown
+    }
+
+internal interface IDeepSeekHarnessProcessProbe
+    {
+        DeepSeekHarnessProcessProbeResult Probe(
+            IList<DeepSeekHarnessProcessIdentity> identities);
     }
 
 internal interface IDeepSeekHarnessProcessValidator
@@ -106,50 +133,51 @@ internal sealed class DeepSeekHarnessProcessValidator :
         public DeepSeekHarnessProcessValidation Validate(
             DeepSeekHarnessSnapshotDocument document)
         {
+            Process host = null;
+            Process parent = null;
             try
             {
-                using (Process host = Process.GetProcessById(document.hostPid))
-                using (Process parent = Process.GetProcessById(
-                    document.hostParentPid))
+                host = Process.GetProcessById(document.hostPid);
+                parent = Process.GetProcessById(document.hostParentPid);
+                DateTime expectedHostStart;
+                if (!DeepSeekHarnessSnapshotReader.TryUtc(
+                        document.hostStartUtc, out expectedHostStart))
                 {
-                    DateTime expectedHostStart;
-                    if (!DeepSeekHarnessSnapshotReader.TryUtc(
-                            document.hostStartUtc, out expectedHostStart))
-                    {
-                        return Result(DeepSeekHarnessProcessCheck.Invalid,
-                            DateTime.MinValue);
-                    }
-                    DateTime hostStart = host.StartTime.ToUniversalTime();
-                    DateTime parentStart = parent.StartTime.ToUniversalTime();
-                    string hostPath = Path.GetFullPath(
-                        host.MainModule.FileName);
-                    string parentPath = Path.GetFullPath(
-                        parent.MainModule.FileName);
-                    string expectedPath = Path.GetFullPath(
-                        document.hostExecutable);
-                    if (Math.Abs((hostStart - expectedHostStart).TotalSeconds) > 2 ||
-                        parentStart > hostStart.AddSeconds(2) ||
-                        !String.Equals(hostPath, expectedPath,
-                            StringComparison.OrdinalIgnoreCase) ||
-                        !String.Equals(parentPath, expectedPath,
-                            StringComparison.OrdinalIgnoreCase))
-                    {
-                        return Result(DeepSeekHarnessProcessCheck.Invalid,
-                            DateTime.MinValue);
-                    }
-                    return Result(DeepSeekHarnessProcessCheck.Valid,
-                        parentStart);
+                    return Result(DeepSeekHarnessProcessCheck.Invalid,
+                        DateTime.MinValue);
                 }
+                DateTime hostStart = host.StartTime.ToUniversalTime();
+                DateTime parentStart = parent.StartTime.ToUniversalTime();
+                string hostPath = Path.GetFullPath(
+                    host.MainModule.FileName);
+                string parentPath = Path.GetFullPath(
+                    parent.MainModule.FileName);
+                string expectedPath = Path.GetFullPath(
+                    document.hostExecutable);
+                if (Math.Abs((hostStart - expectedHostStart).TotalSeconds) > 2 ||
+                    parentStart > hostStart.AddSeconds(2) ||
+                    !String.Equals(hostPath, expectedPath,
+                        StringComparison.OrdinalIgnoreCase) ||
+                    !String.Equals(parentPath, expectedPath,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    return Result(DeepSeekHarnessProcessCheck.Invalid,
+                        DateTime.MinValue);
+                }
+                return Result(DeepSeekHarnessProcessCheck.Valid,
+                    parentStart, host.ProcessName, parent.ProcessName);
             }
             catch (ArgumentException)
             {
                 return Result(DeepSeekHarnessProcessCheck.Exited,
-                    DateTime.MinValue);
+                    DateTime.MinValue, null, null,
+                    BothProcessesExited(document));
             }
             catch (InvalidOperationException)
             {
                 return Result(DeepSeekHarnessProcessCheck.Exited,
-                    DateTime.MinValue);
+                    DateTime.MinValue, null, null,
+                    BothProcessesExited(document));
             }
             catch (System.ComponentModel.Win32Exception)
             {
@@ -176,17 +204,593 @@ internal sealed class DeepSeekHarnessProcessValidator :
                 return Result(DeepSeekHarnessProcessCheck.Unavailable,
                     DateTime.MinValue);
             }
+            finally
+            {
+                if (parent != null) parent.Dispose();
+                if (host != null) host.Dispose();
+            }
         }
 
         private static DeepSeekHarnessProcessValidation Result(
-            DeepSeekHarnessProcessCheck check, DateTime parentStartUtc)
+            DeepSeekHarnessProcessCheck check, DateTime parentStartUtc,
+            string hostProcessName = null, string parentProcessName = null,
+            bool bothProcessesExited = false)
         {
             return new DeepSeekHarnessProcessValidation
             {
                 Check = check,
-                ParentStartUtc = parentStartUtc
+                ParentStartUtc = parentStartUtc,
+                HostProcessName = hostProcessName,
+                ParentProcessName = parentProcessName,
+                BothProcessesExited = bothProcessesExited
             };
         }
+
+        private static bool BothProcessesExited(
+            DeepSeekHarnessSnapshotDocument document)
+        {
+            return IsProcessDefinitelyGone(document.hostPid) &&
+                IsProcessDefinitelyGone(document.hostParentPid);
+        }
+
+        private static bool IsProcessDefinitelyGone(int processId)
+        {
+            try
+            {
+                using (Process process = Process.GetProcessById(processId))
+                {
+                    return process.HasExited;
+                }
+            }
+            catch (ArgumentException)
+            {
+                return true;
+            }
+            catch (InvalidOperationException)
+            {
+                return true;
+            }
+            catch (System.ComponentModel.Win32Exception)
+            {
+                return false;
+            }
+            catch (IOException)
+            {
+                return false;
+            }
+            catch (UnauthorizedAccessException)
+            {
+                return false;
+            }
+            catch (System.Security.SecurityException)
+            {
+                return false;
+            }
+        }
+    }
+
+internal sealed class DeepSeekHarnessProcessProbe :
+    IDeepSeekHarnessProcessProbe
+    {
+        private const uint SnapshotProcesses = 0x00000002;
+        private const int ErrorNoMoreFiles = 18;
+        private static readonly IntPtr InvalidHandle = new IntPtr(-1);
+
+        public DeepSeekHarnessProcessProbeResult Probe(
+            IList<DeepSeekHarnessProcessIdentity> identities)
+        {
+            if (identities == null || identities.Count == 0)
+            {
+                return DeepSeekHarnessProcessProbeResult.Unknown;
+            }
+
+            Dictionary<uint, ProcessEntry> processes =
+                new Dictionary<uint, ProcessEntry>();
+            if (!TryReadProcesses(processes))
+            {
+                return DeepSeekHarnessProcessProbeResult.Unknown;
+            }
+
+            bool unknown = false;
+            foreach (DeepSeekHarnessProcessIdentity identity in identities)
+            {
+                if (identity == null ||
+                    String.IsNullOrWhiteSpace(identity.HostExecutable) ||
+                    String.IsNullOrWhiteSpace(identity.HostProcessName) ||
+                    String.IsNullOrWhiteSpace(identity.ParentProcessName) ||
+                    String.IsNullOrWhiteSpace(identity.HostProfileDir) ||
+                    String.IsNullOrWhiteSpace(identity.HostRuntimeDir))
+                {
+                    unknown = true;
+                    continue;
+                }
+
+                foreach (ProcessEntry hostEntry in processes.Values)
+                {
+                    if (!SameProcessName(hostEntry.ExecutableName,
+                            identity.HostProcessName))
+                    {
+                        continue;
+                    }
+
+                    ProcessIdentityRead hostResult = ReadProcess(hostEntry,
+                        identity.HostExecutable,
+                        identity.HostProcessName);
+                    if (hostResult.Result == ProcessReadResult.Different)
+                    {
+                        continue;
+                    }
+                    if (hostResult.Result == ProcessReadResult.Unknown)
+                    {
+                        unknown = true;
+                        continue;
+                    }
+
+                    ProcessEntry parentEntry;
+                    if (!processes.TryGetValue(hostEntry.ParentProcessId,
+                            out parentEntry))
+                    {
+                        unknown = true;
+                        continue;
+                    }
+                    if (!SameProcessName(parentEntry.ExecutableName,
+                            identity.ParentProcessName))
+                    {
+                        continue;
+                    }
+
+                    ProcessIdentityRead parentRead = ReadProcessIdentity(
+                        parentEntry);
+                    if (parentRead.Result == ProcessReadResult.Unknown)
+                    {
+                        unknown = true;
+                        continue;
+                    }
+                    if (parentRead.Result == ProcessReadResult.Different ||
+                        !SameProcessName(parentRead.ProcessName,
+                            identity.ParentProcessName) ||
+                        !SamePath(parentRead.Executable,
+                            identity.HostExecutable) ||
+                        parentRead.StartUtc > hostResult.StartUtc.AddSeconds(2))
+                    {
+                        continue;
+                    }
+
+                    ProcessReadResult launchIdentity =
+                        HasMatchingLaunchArguments(hostEntry.ProcessId,
+                            identity);
+                    if (launchIdentity == ProcessReadResult.Unknown)
+                    {
+                        unknown = true;
+                        continue;
+                    }
+                    if (launchIdentity == ProcessReadResult.Different)
+                    {
+                        continue;
+                    }
+                    return DeepSeekHarnessProcessProbeResult.Found;
+                }
+            }
+
+            return unknown
+                ? DeepSeekHarnessProcessProbeResult.Unknown
+                : DeepSeekHarnessProcessProbeResult.NotFound;
+        }
+
+        private static ProcessReadResult HasMatchingLaunchArguments(
+            uint processId, DeepSeekHarnessProcessIdentity identity)
+        {
+            string commandLine;
+            if (!TryReadCommandLine(processId, out commandLine) ||
+                String.IsNullOrWhiteSpace(commandLine))
+            {
+                return ProcessReadResult.Unknown;
+            }
+
+            int argumentCount;
+            IntPtr arguments = CommandLineToArgvW(commandLine,
+                out argumentCount);
+            if (arguments == IntPtr.Zero)
+            {
+                return ProcessReadResult.Unknown;
+            }
+            try
+            {
+                List<int> runtimeArguments = new List<int>();
+                List<int> profileArguments = new List<int>();
+                string expectedRuntime = NormalizePathForComparison(
+                    identity.HostRuntimeDir);
+                string expectedProfile = NormalizePathForComparison(
+                    identity.HostProfileDir);
+                for (int index = 0; index < argumentCount; index++)
+                {
+                    IntPtr argumentPointer = Marshal.ReadIntPtr(arguments,
+                        index * IntPtr.Size);
+                    string argument = Marshal.PtrToStringUni(
+                        argumentPointer);
+                    string fullPath;
+                    if (!TryNormalizeAbsolutePath(argument, out fullPath))
+                    {
+                        continue;
+                    }
+
+                    if (String.Equals(fullPath, expectedRuntime,
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        runtimeArguments.Add(index);
+                    }
+                    if (String.Equals(fullPath, expectedProfile,
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        profileArguments.Add(index);
+                    }
+                }
+
+                if (runtimeArguments.Count > 1 ||
+                    profileArguments.Count > 1)
+                {
+                    return ProcessReadResult.Unknown;
+                }
+                if (runtimeArguments.Count == 1 &&
+                    profileArguments.Count == 1)
+                {
+                    int runtimeIndex = runtimeArguments[0];
+                    int profileIndex = profileArguments[0];
+                    if (profileIndex == runtimeIndex + 1)
+                    {
+                        return ProcessReadResult.Match;
+                    }
+                    return ProcessReadResult.Unknown;
+                }
+                if (runtimeArguments.Count == 1)
+                {
+                    int nextIndex = runtimeArguments[0] + 1;
+                    string nextPath;
+                    if (nextIndex < argumentCount &&
+                        TryNormalizeAbsolutePath(Marshal.PtrToStringUni(
+                            Marshal.ReadIntPtr(arguments,
+                                nextIndex * IntPtr.Size)), out nextPath))
+                    {
+                        return ProcessReadResult.Different;
+                    }
+                    return ProcessReadResult.Unknown;
+                }
+                if (profileArguments.Count == 1)
+                {
+                    int previousIndex = profileArguments[0] - 1;
+                    string previousPath;
+                    if (previousIndex >= 0 &&
+                        TryNormalizeAbsolutePath(Marshal.PtrToStringUni(
+                            Marshal.ReadIntPtr(arguments,
+                                previousIndex * IntPtr.Size)),
+                            out previousPath))
+                    {
+                        return ProcessReadResult.Different;
+                    }
+                }
+                return ProcessReadResult.Unknown;
+            }
+            finally
+            {
+                LocalFree(arguments);
+            }
+        }
+
+        private static bool TryNormalizeAbsolutePath(string value,
+            out string normalized)
+        {
+            normalized = null;
+            if (String.IsNullOrWhiteSpace(value) ||
+                !Path.IsPathRooted(value))
+            {
+                return false;
+            }
+            try
+            {
+                normalized = NormalizePathForComparison(value);
+                return true;
+            }
+            catch (ArgumentException)
+            {
+                return false;
+            }
+            catch (IOException)
+            {
+                return false;
+            }
+            catch (NotSupportedException)
+            {
+                return false;
+            }
+            catch (System.Security.SecurityException)
+            {
+                return false;
+            }
+        }
+
+        private static string NormalizePathForComparison(string path)
+        {
+            string fullPath = Path.GetFullPath(path);
+            string root = Path.GetPathRoot(fullPath);
+            int minimumLength = String.IsNullOrEmpty(root) ? 0 : root.Length;
+            while (fullPath.Length > minimumLength &&
+                (fullPath[fullPath.Length - 1] ==
+                    Path.DirectorySeparatorChar ||
+                 fullPath[fullPath.Length - 1] ==
+                    Path.AltDirectorySeparatorChar))
+            {
+                fullPath = fullPath.Substring(0, fullPath.Length - 1);
+            }
+            return fullPath;
+        }
+
+        private static bool TryReadCommandLine(uint processId,
+            out string commandLine)
+        {
+            object locator = null;
+            object services = null;
+            object process = null;
+            commandLine = null;
+            try
+            {
+                Type locatorType = Type.GetTypeFromProgID(
+                    "WbemScripting.SWbemLocator");
+                if (locatorType == null)
+                {
+                    return false;
+                }
+                locator = Activator.CreateInstance(locatorType);
+                services = locatorType.InvokeMember("ConnectServer",
+                    BindingFlags.InvokeMethod | BindingFlags.Public |
+                        BindingFlags.Instance, null, locator,
+                    new object[] { ".", "root\\CIMV2" });
+                if (services == null)
+                {
+                    return false;
+                }
+                string objectPath = "Win32_Process.Handle=\"" +
+                    processId.ToString(CultureInfo.InvariantCulture) + "\"";
+                process = services.GetType().InvokeMember("Get",
+                    BindingFlags.InvokeMethod | BindingFlags.Public |
+                        BindingFlags.Instance, null, services,
+                    new object[] { objectPath });
+                if (process == null)
+                {
+                    return false;
+                }
+                object value = process.GetType().InvokeMember("CommandLine",
+                    BindingFlags.GetProperty | BindingFlags.Public |
+                        BindingFlags.Instance, null, process, null);
+                commandLine = value as string;
+                return !String.IsNullOrWhiteSpace(commandLine);
+            }
+            catch
+            {
+                commandLine = null;
+                return false;
+            }
+            finally
+            {
+                ReleaseComObject(process);
+                ReleaseComObject(services);
+                ReleaseComObject(locator);
+            }
+        }
+
+        private static void ReleaseComObject(object value)
+        {
+            if (value != null && Marshal.IsComObject(value))
+            {
+                try
+                {
+                    Marshal.ReleaseComObject(value);
+                }
+                catch
+                {
+                }
+            }
+        }
+
+        private static bool TryReadProcesses(
+            Dictionary<uint, ProcessEntry> processes)
+        {
+            IntPtr snapshot = CreateToolhelp32Snapshot(SnapshotProcesses, 0);
+            if (snapshot == IntPtr.Zero || snapshot == InvalidHandle)
+            {
+                return false;
+            }
+
+            try
+            {
+                ProcessEntry32 entry = new ProcessEntry32();
+                entry.Size = (uint)Marshal.SizeOf(typeof(ProcessEntry32));
+                if (!Process32First(snapshot, ref entry))
+                {
+                    return Marshal.GetLastWin32Error() == ErrorNoMoreFiles;
+                }
+
+                do
+                {
+                    processes[entry.ProcessId] = new ProcessEntry
+                    {
+                        ProcessId = entry.ProcessId,
+                        ParentProcessId = entry.ParentProcessId,
+                        ExecutableName = entry.ExecutableName
+                    };
+                    entry.Size = (uint)Marshal.SizeOf(
+                        typeof(ProcessEntry32));
+                }
+                while (Process32Next(snapshot, ref entry));
+
+                return Marshal.GetLastWin32Error() == ErrorNoMoreFiles;
+            }
+            finally
+            {
+                CloseHandle(snapshot);
+            }
+        }
+
+        private static ProcessIdentityRead ReadProcess(ProcessEntry entry,
+            string expectedExecutable, string expectedName)
+        {
+            ProcessIdentityRead identity = ReadProcessIdentity(entry);
+            if (identity.Result != ProcessReadResult.Match)
+            {
+                return identity;
+            }
+            if (!SameProcessName(identity.ProcessName, expectedName) ||
+                !SamePath(identity.Executable, expectedExecutable))
+            {
+                identity.Result = ProcessReadResult.Different;
+            }
+            return identity;
+        }
+
+        private static ProcessIdentityRead ReadProcessIdentity(
+            ProcessEntry entry)
+        {
+            try
+            {
+                using (Process process = Process.GetProcessById(
+                    (int)entry.ProcessId))
+                {
+                    string name = process.ProcessName;
+                    string executable = Path.GetFullPath(
+                        process.MainModule.FileName);
+                    DateTime startUtc = process.StartTime.ToUniversalTime();
+                    return new ProcessIdentityRead
+                    {
+                        Result = ProcessReadResult.Match,
+                        ProcessName = name,
+                        Executable = executable,
+                        StartUtc = startUtc
+                    };
+                }
+            }
+            catch (ArgumentException)
+            {
+                return UnknownIdentity();
+            }
+            catch (InvalidOperationException)
+            {
+                return UnknownIdentity();
+            }
+            catch (System.ComponentModel.Win32Exception)
+            {
+                return UnknownIdentity();
+            }
+            catch (IOException)
+            {
+                return UnknownIdentity();
+            }
+            catch (UnauthorizedAccessException)
+            {
+                return UnknownIdentity();
+            }
+            catch (System.Security.SecurityException)
+            {
+                return UnknownIdentity();
+            }
+            catch (NotSupportedException)
+            {
+                return UnknownIdentity();
+            }
+        }
+
+        private static ProcessIdentityRead UnknownIdentity()
+        {
+            return new ProcessIdentityRead
+            {
+                Result = ProcessReadResult.Unknown
+            };
+        }
+
+        private static bool SameProcessName(string actual, string expected)
+        {
+            string actualName = Path.GetFileNameWithoutExtension(actual ??
+                String.Empty);
+            string expectedName = Path.GetFileNameWithoutExtension(
+                expected ?? String.Empty);
+            return String.Equals(actualName, expectedName,
+                StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool SamePath(string actual, string expected)
+        {
+            try
+            {
+                return String.Equals(Path.GetFullPath(actual),
+                    Path.GetFullPath(expected),
+                    StringComparison.OrdinalIgnoreCase);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private enum ProcessReadResult
+        {
+            Match,
+            Different,
+            Unknown
+        }
+
+        private sealed class ProcessEntry
+        {
+            public uint ProcessId;
+            public uint ParentProcessId;
+            public string ExecutableName;
+        }
+
+        private sealed class ProcessIdentityRead
+        {
+            public ProcessReadResult Result;
+            public string ProcessName;
+            public string Executable;
+            public DateTime StartUtc;
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct ProcessEntry32
+        {
+            public uint Size;
+            public uint UsageCount;
+            public uint ProcessId;
+            public IntPtr DefaultHeapId;
+            public uint ModuleId;
+            public uint ThreadCount;
+            public uint ParentProcessId;
+            public int BasePriority;
+            public uint Flags;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)]
+            public string ExecutableName;
+        }
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern IntPtr CreateToolhelp32Snapshot(
+            uint flags, uint processId);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode,
+            EntryPoint = "Process32FirstW", SetLastError = true)]
+        private static extern bool Process32First(IntPtr snapshot,
+            ref ProcessEntry32 entry);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode,
+            EntryPoint = "Process32NextW", SetLastError = true)]
+        private static extern bool Process32Next(IntPtr snapshot,
+            ref ProcessEntry32 entry);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool CloseHandle(IntPtr handle);
+
+        [DllImport("shell32.dll", CharSet = CharSet.Unicode,
+            SetLastError = true)]
+        private static extern IntPtr CommandLineToArgvW(string commandLine,
+            out int argumentCount);
+
+        [DllImport("kernel32.dll")]
+        private static extern IntPtr LocalFree(IntPtr memory);
     }
 
 internal sealed class DeepSeekHarnessInstanceSnapshot
@@ -201,6 +805,8 @@ internal sealed class DeepSeekHarnessReadResult
     {
         public readonly List<DeepSeekHarnessInstanceSnapshot> Instances =
             new List<DeepSeekHarnessInstanceSnapshot>();
+        public readonly HashSet<string> ConfirmedExitedInstanceIds =
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         public AgentIntegrationState IntegrationState;
         public string StatusDetailKey;
         public DateTime LastEventUtc;
@@ -208,6 +814,8 @@ internal sealed class DeepSeekHarnessReadResult
         public bool HadStoppedInstance;
         public bool Unsupported;
         public bool Broken;
+        public bool UnverifiedStoppedInstance;
+        public int ConfirmedExitedInstances;
     }
 
 internal sealed class DeepSeekHarnessSnapshotReader
@@ -227,10 +835,16 @@ internal sealed class DeepSeekHarnessSnapshotReader
 
         private readonly string runtimeDirectory;
         private readonly IDeepSeekHarnessProcessValidator processValidator;
+        private readonly IDeepSeekHarnessProcessProbe processProbe;
         private readonly JavaScriptSerializer serializer;
         private readonly Dictionary<string, RevisionState> revisions =
             new Dictionary<string, RevisionState>(
                 StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, VerifiedSnapshotIdentity>
+            verifiedSnapshots = new Dictionary<string,
+                VerifiedSnapshotIdentity>(StringComparer.OrdinalIgnoreCase);
+        private readonly List<DeepSeekHarnessProcessIdentity>
+            processIdentities = new List<DeepSeekHarnessProcessIdentity>();
         private bool hasSeenInstance;
 
         public DeepSeekHarnessSnapshotReader()
@@ -242,11 +856,43 @@ internal sealed class DeepSeekHarnessSnapshotReader
 
         internal DeepSeekHarnessSnapshotReader(string directory,
             IDeepSeekHarnessProcessValidator validator)
+            : this(directory, validator, new DeepSeekHarnessProcessProbe())
         {
+        }
+
+        internal DeepSeekHarnessSnapshotReader(string directory,
+            IDeepSeekHarnessProcessValidator validator,
+            IDeepSeekHarnessProcessProbe restartProbe)
+        {
+            if (validator == null)
+            {
+                throw new ArgumentNullException("validator");
+            }
+            if (restartProbe == null)
+            {
+                throw new ArgumentNullException("restartProbe");
+            }
             runtimeDirectory = Path.GetFullPath(directory);
             processValidator = validator;
+            processProbe = restartProbe;
             serializer = new JavaScriptSerializer();
             serializer.MaxJsonLength = MaxSnapshotBytes;
+        }
+
+        internal bool CanStopSnapshotPolling(
+            DeepSeekHarnessReadResult result)
+        {
+            return hasSeenInstance && processIdentities.Count > 0 &&
+                result != null && result.HadStoppedInstance &&
+                result.ConfirmedExitedInstances > 0 &&
+                !result.UnverifiedStoppedInstance && !result.Broken &&
+                !result.Unsupported && result.Instances.Count == 0 &&
+                revisions.Count == 0;
+        }
+
+        internal DeepSeekHarnessProcessProbeResult ProbeForRestart()
+        {
+            return processProbe.Probe(processIdentities);
         }
 
         public DeepSeekHarnessReadResult Read(DateTime nowUtc)
@@ -301,6 +947,7 @@ internal sealed class DeepSeekHarnessSnapshotReader
                 result.StatusDetailKey = "status.deepseek.unknown";
                 return result;
             }
+            PruneVerifiedSnapshots(files);
             HashSet<string> activeInstances = new HashSet<string>(
                 StringComparer.OrdinalIgnoreCase);
             bool parentIdentityChanged = false;
@@ -341,6 +988,15 @@ internal sealed class DeepSeekHarnessSnapshotReader
                     if (validation.Check == DeepSeekHarnessProcessCheck.Exited)
                     {
                         result.HadStoppedInstance = true;
+                        bool verified = HasVerifiedSnapshot(document);
+                        if (!verified)
+                        {
+                            result.UnverifiedStoppedInstance = true;
+                        }
+                        else if (validation.BothProcessesExited)
+                        {
+                            ConfirmExitedInstance(result, document.instanceId);
+                        }
                     }
                     else
                     {
@@ -350,6 +1006,8 @@ internal sealed class DeepSeekHarnessSnapshotReader
                 }
 
                 hasSeenInstance = true;
+                RememberProcessIdentity(document, validation);
+                RememberVerifiedSnapshot(document);
                 activeInstances.Add(document.instanceId);
                 DateTime publishedUtc;
                 TryUtc(document.publishedAtUtc, out publishedUtc);
@@ -414,41 +1072,7 @@ internal sealed class DeepSeekHarnessSnapshotReader
                         revisions.Remove(instanceId);
                         continue;
                     }
-                    DeepSeekHarnessProcessValidation cachedValidation =
-                        processValidator.Validate(cached.Document);
-                    if (cachedValidation != null && cachedValidation.Check ==
-                            DeepSeekHarnessProcessCheck.Valid &&
-                        (cached.ParentStartUtc == DateTime.MinValue ||
-                            Math.Abs((cached.ParentStartUtc -
-                                cachedValidation.ParentStartUtc)
-                                .TotalSeconds) <= 2))
-                    {
-                        result.Instances.Add(new
-                            DeepSeekHarnessInstanceSnapshot
-                        {
-                            Document = cached.Document,
-                            PublishedUtc = cached.PublishedUtc,
-                            ParentStartUtc = cached.ParentStartUtc,
-                            Fresh = false
-                        });
-                        if (cached.PublishedUtc > result.LastEventUtc)
-                        {
-                            result.LastEventUtc = cached.PublishedUtc;
-                        }
-                    }
-                    else
-                    {
-                        revisions.Remove(instanceId);
-                        if (cachedValidation != null && cachedValidation.Check ==
-                            DeepSeekHarnessProcessCheck.Exited)
-                        {
-                            result.HadStoppedInstance = true;
-                        }
-                        else
-                        {
-                            result.Broken = true;
-                        }
-                    }
+                    AddCachedInstance(result, instanceId, cached);
                 }
             }
 
@@ -465,40 +1089,135 @@ internal sealed class DeepSeekHarnessSnapshotReader
             foreach (string instanceId in revisions.Keys.ToList())
             {
                 RevisionState cached = revisions[instanceId];
-                DeepSeekHarnessProcessValidation validation =
-                    processValidator.Validate(cached.Document);
-                if (validation != null && validation.Check ==
-                        DeepSeekHarnessProcessCheck.Valid &&
-                    (cached.ParentStartUtc == DateTime.MinValue ||
-                        Math.Abs((cached.ParentStartUtc -
-                            validation.ParentStartUtc).TotalSeconds) <= 2))
+                AddCachedInstance(result, instanceId, cached);
+            }
+        }
+
+        private void AddCachedInstance(DeepSeekHarnessReadResult result,
+            string instanceId, RevisionState cached)
+        {
+            DeepSeekHarnessProcessValidation validation =
+                processValidator.Validate(cached.Document);
+            if (validation != null && validation.Check ==
+                    DeepSeekHarnessProcessCheck.Valid &&
+                (cached.ParentStartUtc == DateTime.MinValue ||
+                    Math.Abs((cached.ParentStartUtc -
+                        validation.ParentStartUtc).TotalSeconds) <= 2))
+            {
+                result.Instances.Add(new DeepSeekHarnessInstanceSnapshot
                 {
-                    result.Instances.Add(new DeepSeekHarnessInstanceSnapshot
+                    Document = cached.Document,
+                    PublishedUtc = cached.PublishedUtc,
+                    ParentStartUtc = cached.ParentStartUtc,
+                    Fresh = false
+                });
+                if (cached.PublishedUtc > result.LastEventUtc)
+                {
+                    result.LastEventUtc = cached.PublishedUtc;
+                }
+            }
+            else
+            {
+                if (validation != null && validation.Check ==
+                    DeepSeekHarnessProcessCheck.Exited)
+                {
+                    result.HadStoppedInstance = true;
+                    if (validation.BothProcessesExited)
                     {
-                        Document = cached.Document,
-                        PublishedUtc = cached.PublishedUtc,
-                        ParentStartUtc = cached.ParentStartUtc,
-                        Fresh = false
-                    });
-                    if (cached.PublishedUtc > result.LastEventUtc)
-                    {
-                        result.LastEventUtc = cached.PublishedUtc;
+                        revisions.Remove(instanceId);
+                        ConfirmExitedInstance(result, instanceId);
                     }
                 }
                 else
                 {
-                    revisions.Remove(instanceId);
-                    if (validation != null && validation.Check ==
-                        DeepSeekHarnessProcessCheck.Exited)
-                    {
-                        result.HadStoppedInstance = true;
-                    }
-                    else
-                    {
-                        result.Broken = true;
-                    }
+                    result.Broken = true;
                 }
             }
+        }
+
+        private bool HasVerifiedSnapshot(
+            DeepSeekHarnessSnapshotDocument document)
+        {
+            VerifiedSnapshotIdentity state;
+            return document != null &&
+                verifiedSnapshots.TryGetValue(document.instanceId,
+                    out state) && state.Matches(document);
+        }
+
+        private void RememberVerifiedSnapshot(
+            DeepSeekHarnessSnapshotDocument document)
+        {
+            if (document == null ||
+                String.IsNullOrWhiteSpace(document.instanceId))
+            {
+                return;
+            }
+            verifiedSnapshots[document.instanceId] =
+                new VerifiedSnapshotIdentity(document);
+        }
+
+        private void PruneVerifiedSnapshots(string[] files)
+        {
+            HashSet<string> presentInstances = new HashSet<string>(
+                files.Select(delegate(string file)
+                {
+                    return Path.GetFileNameWithoutExtension(file);
+                }), StringComparer.OrdinalIgnoreCase);
+            foreach (string instanceId in verifiedSnapshots.Keys.ToList())
+            {
+                if (!presentInstances.Contains(instanceId))
+                {
+                    verifiedSnapshots.Remove(instanceId);
+                }
+            }
+        }
+
+        private static void ConfirmExitedInstance(
+            DeepSeekHarnessReadResult result, string instanceId)
+        {
+            if (!String.IsNullOrWhiteSpace(instanceId) &&
+                result.ConfirmedExitedInstanceIds.Add(instanceId))
+            {
+                result.ConfirmedExitedInstances++;
+            }
+        }
+
+        private void RememberProcessIdentity(
+            DeepSeekHarnessSnapshotDocument document,
+            DeepSeekHarnessProcessValidation validation)
+        {
+            if (String.IsNullOrWhiteSpace(validation.HostProcessName) ||
+                String.IsNullOrWhiteSpace(validation.ParentProcessName))
+            {
+                return;
+            }
+            foreach (DeepSeekHarnessProcessIdentity previous in
+                processIdentities)
+            {
+                if (SameFullPath(previous.HostExecutable,
+                        document.hostExecutable) &&
+                    String.Equals(previous.HostProcessName,
+                        validation.HostProcessName,
+                        StringComparison.OrdinalIgnoreCase) &&
+                    String.Equals(previous.ParentProcessName,
+                        validation.ParentProcessName,
+                        StringComparison.OrdinalIgnoreCase) &&
+                    SameFullPath(previous.HostProfileDir,
+                        document.hostProfileDir) &&
+                    SameFullPath(previous.HostRuntimeDir,
+                        document.hostRuntimeDir))
+                {
+                    return;
+                }
+            }
+            processIdentities.Add(new DeepSeekHarnessProcessIdentity
+            {
+                HostExecutable = Path.GetFullPath(document.hostExecutable),
+                HostProcessName = validation.HostProcessName,
+                ParentProcessName = validation.ParentProcessName,
+                HostProfileDir = Path.GetFullPath(document.hostProfileDir),
+                HostRuntimeDir = Path.GetFullPath(document.hostRuntimeDir)
+            });
         }
 
         private RevisionState GetRevisionState(
@@ -785,6 +1504,33 @@ internal sealed class DeepSeekHarnessSnapshotReader
             public DateTime ParentStartUtc;
             public long LastProgressTicks;
         }
+
+        private sealed class VerifiedSnapshotIdentity
+        {
+            private readonly int hostPid;
+            private readonly int hostParentPid;
+            private readonly string hostStartUtc;
+            private readonly string hostExecutable;
+
+            public VerifiedSnapshotIdentity(
+                DeepSeekHarnessSnapshotDocument document)
+            {
+                hostPid = document.hostPid;
+                hostParentPid = document.hostParentPid;
+                hostStartUtc = document.hostStartUtc;
+                hostExecutable = document.hostExecutable;
+            }
+
+            public bool Matches(DeepSeekHarnessSnapshotDocument document)
+            {
+                return document != null && hostPid == document.hostPid &&
+                    hostParentPid == document.hostParentPid &&
+                    String.Equals(hostStartUtc, document.hostStartUtc,
+                        StringComparison.Ordinal) &&
+                    String.Equals(hostExecutable, document.hostExecutable,
+                        StringComparison.OrdinalIgnoreCase);
+            }
+        }
     }
 
 internal sealed class DeepSeekHarnessTaskView
@@ -825,11 +1571,10 @@ internal static class DeepSeekHarnessSnapshotReducer
             }
             List<DeepSeekHarnessTaskView> views = BuildTaskViews(source,
                 settings, nowUtc);
-            DeepSeekHarnessTaskView selected = SelectTask(views,
+            DeepSeekHarnessTaskView selected = SelectTaskAndOrder(views,
                 previousRootId);
             selectedRootId = selected == null ? String.Empty :
                 selected.Task.rootSessionId;
-            OrderTasks(views, selected);
 
             List<SessionSnapshot> sessions = new List<SessionSnapshot>();
             foreach (DeepSeekHarnessTaskView view in views)
@@ -1425,14 +2170,16 @@ internal static class DeepSeekHarnessSnapshotReducer
                 ? activity : DateTime.MinValue;
         }
 
-        private static void OrderTasks(List<DeepSeekHarnessTaskView> views,
-            DeepSeekHarnessTaskView selected)
+        private static DeepSeekHarnessTaskView SelectTaskAndOrder(
+            List<DeepSeekHarnessTaskView> views, string previousRootId)
         {
+            if (views.Count == 0)
+            {
+                return null;
+            }
             views.Sort(delegate(DeepSeekHarnessTaskView left,
                 DeepSeekHarnessTaskView right)
             {
-                if (Object.ReferenceEquals(left, selected)) return -1;
-                if (Object.ReferenceEquals(right, selected)) return 1;
                 int priority = right.Priority.CompareTo(left.Priority);
                 if (priority != 0) return priority;
                 int activity = right.ActivityUtc.CompareTo(left.ActivityUtc);
@@ -1440,43 +2187,31 @@ internal static class DeepSeekHarnessSnapshotReducer
                     left.Task.rootSessionId, right.Task.rootSessionId,
                     StringComparison.Ordinal);
             });
-        }
 
-        private static DeepSeekHarnessTaskView SelectTask(
-            List<DeepSeekHarnessTaskView> views, string previousRootId)
-        {
-            if (views.Count == 0)
+            DeepSeekHarnessTaskView selected = views[0];
+            if (!String.IsNullOrWhiteSpace(previousRootId) &&
+                !String.Equals(views[0].Task.rootSessionId,
+                    previousRootId, StringComparison.Ordinal))
             {
-                return null;
-            }
-            List<DeepSeekHarnessTaskView> ordered = views.OrderByDescending(
-                delegate(DeepSeekHarnessTaskView view)
+                for (int index = 1; index < views.Count; index++)
                 {
-                    return view.Priority;
-                }).ThenByDescending(delegate(DeepSeekHarnessTaskView view)
-                {
-                    return view.ActivityUtc;
-                }).ThenBy(delegate(DeepSeekHarnessTaskView view)
-                {
-                    return view.Task.rootSessionId;
-                }, StringComparer.Ordinal).ToList();
-            if (!String.IsNullOrWhiteSpace(previousRootId))
-            {
-                DeepSeekHarnessTaskView first = ordered[0];
-                DeepSeekHarnessTaskView previous = ordered.FirstOrDefault(
-                    delegate(DeepSeekHarnessTaskView view)
+                    DeepSeekHarnessTaskView candidate = views[index];
+                    if (candidate.Priority != selected.Priority ||
+                        candidate.ActivityUtc != selected.ActivityUtc)
                     {
-                        return String.Equals(view.Task.rootSessionId,
-                            previousRootId, StringComparison.Ordinal) &&
-                            view.Priority == first.Priority &&
-                            view.ActivityUtc == first.ActivityUtc;
-                    });
-                if (previous != null)
-                {
-                    return previous;
+                        break;
+                    }
+                    if (String.Equals(candidate.Task.rootSessionId,
+                            previousRootId, StringComparison.Ordinal))
+                    {
+                        selected = candidate;
+                        views.RemoveAt(index);
+                        views.Insert(0, selected);
+                        break;
+                    }
                 }
             }
-            return ordered[0];
+            return selected;
         }
 
         private static SessionSnapshot ToSession(

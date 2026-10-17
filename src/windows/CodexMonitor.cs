@@ -181,6 +181,15 @@ public sealed class SessionTracker
                 previousState != Snapshot.State || previousAction != Snapshot.Action;
         }
 
+        internal void SuspendActiveTurn()
+        {
+            if (!Snapshot.Active) return;
+            ClearActiveTools();
+            ClearPlanModeState();
+            SetBusinessState(HaloState.Idle, AgentTurnPhase.None,
+                AgentActivityKind.None, "Ready", false);
+        }
+
         private bool HasActiveTools
         {
             get { return activeToolIds.Count > 0 || anonymousActiveTools > 0; }
@@ -923,6 +932,8 @@ public sealed class CodexSessionMonitor : IDisposable
         private readonly Dispatcher dispatcher;
         private readonly object sync;
         private DateTime lastDiscoveryUtc;
+        private DateTime lastFullRefreshUtc;
+        private DateTime processLifecycleBaselineUtc;
         private DateTime nextRealtimePollUtc;
         private HaloState realtimeState;
         private string realtimeAction;
@@ -976,6 +987,7 @@ public sealed class CodexSessionMonitor : IDisposable
             {
                 started = true;
                 lastDiscoveryUtc = DateTime.MinValue;
+                lastFullRefreshUtc = DateTime.MinValue;
                 EnsureSessionWatcher();
             }
             timer.Change(0, 220);
@@ -995,7 +1007,8 @@ public sealed class CodexSessionMonitor : IDisposable
             }
         }
 
-        internal void SetCodexRunning(bool isRunning)
+        internal void SetCodexRunning(bool isRunning,
+            DateTime? lifecycleBaselineUtc = null)
         {
             lock (sync)
             {
@@ -1007,10 +1020,31 @@ public sealed class CodexSessionMonitor : IDisposable
                 codexRunning = isRunning;
                 if (isRunning)
                 {
+                    if (lifecycleBaselineUtc.HasValue)
+                    {
+                        processLifecycleBaselineUtc = lifecycleBaselineUtc.Value;
+                        foreach (SessionTracker tracker in trackers.Values)
+                        {
+                            SuspendOldActivity(tracker);
+                        }
+                        hasRealtimeActivity = false;
+                        realtimeState = HaloState.Idle;
+                        realtimeAction = String.Empty;
+                    }
                     nextRealtimePollUtc = DateTime.MinValue;
                 }
                 else
                 {
+                    processLifecycleBaselineUtc = lifecycleBaselineUtc ??
+                        DateTime.UtcNow;
+                    foreach (SessionTracker tracker in trackers.Values)
+                    {
+                        if (!lifecycleBaselineUtc.HasValue ||
+                            tracker.Snapshot.LastEventUtc <= lifecycleBaselineUtc.Value)
+                        {
+                            tracker.SuspendActiveTurn();
+                        }
+                    }
                     nextRealtimePollUtc = DateTime.MaxValue;
                     hasRealtimeActivity = false;
                     realtimeState = HaloState.Idle;
@@ -1035,19 +1069,22 @@ public sealed class CodexSessionMonitor : IDisposable
                         return;
                     }
                     EnsureSessionWatcher();
-                    if (DrainPendingSessions())
-                    {
-                        changed = true;
-                    }
-                    if ((DateTime.UtcNow - lastDiscoveryUtc).TotalSeconds >= 30)
+                    DateTime nowUtc = DateTime.UtcNow;
+                    bool fullRefresh = nowUtc - lastFullRefreshUtc >=
+                        TimeSpan.FromSeconds(3);
+                    if (nowUtc - lastDiscoveryUtc >= TimeSpan.FromSeconds(30))
                     {
                         changed = Discover() || changed;
+                        fullRefresh = true;
                     }
-                    foreach (SessionTracker tracker in trackers.Values.ToList())
+                    changed = DrainPendingSessions(!fullRefresh) || changed;
+                    if (fullRefresh)
                     {
-                        if (tracker.Refresh())
+                        lastFullRefreshUtc = nowUtc;
+                        foreach (SessionTracker tracker in trackers.Values)
                         {
-                            changed = true;
+                            changed = tracker.Refresh() || changed;
+                            SuspendOldActivity(tracker);
                         }
                     }
                     if (realtimeEnabled && (!processStateKnown || codexRunning) &&
@@ -1056,7 +1093,8 @@ public sealed class CodexSessionMonitor : IDisposable
                         nextRealtimePollUtc = DateTime.UtcNow.AddMilliseconds(300);
                         HaloState activeState;
                         string activeAction;
-                        bool active = realtimeActivity.TryReadActive(out activeState,
+                        bool active = realtimeActivity.TryReadActive(
+                            processLifecycleBaselineUtc, out activeState,
                             out activeAction);
                         if (active != hasRealtimeActivity ||
                             activeState != realtimeState ||
@@ -1123,6 +1161,7 @@ public sealed class CodexSessionMonitor : IDisposable
                     if (!trackers.ContainsKey(path))
                     {
                         trackers[path] = new SessionTracker(path);
+                        SuspendOldActivity(trackers[path]);
                         changed = true;
                     }
                 }
@@ -1170,6 +1209,7 @@ public sealed class CodexSessionMonitor : IDisposable
                     OnSessionFileChanged(sender, args);
                 };
                 sessionWatcher.Deleted += OnSessionFileChanged;
+                sessionWatcher.Error += OnSessionWatcherError;
                 sessionWatcher.EnableRaisingEvents = true;
             }
             catch (Exception ex)
@@ -1189,6 +1229,20 @@ public sealed class CodexSessionMonitor : IDisposable
             QueueSessionPath(args.FullPath);
         }
 
+        private void OnSessionWatcherError(object sender, ErrorEventArgs args)
+        {
+            lock (sync)
+            {
+                if (!started || !Object.ReferenceEquals(sender, sessionWatcher))
+                    return;
+                sessionWatcher.Dispose();
+                sessionWatcher = null;
+                lastDiscoveryUtc = DateTime.MinValue;
+                lastFullRefreshUtc = DateTime.MinValue;
+            }
+            RateLimitReader.InvalidateCandidates();
+        }
+
         private void QueueSessionPath(string path)
         {
             if (String.IsNullOrEmpty(path) ||
@@ -1206,7 +1260,7 @@ public sealed class CodexSessionMonitor : IDisposable
             }
         }
 
-        private bool DrainPendingSessions()
+        private bool DrainPendingSessions(bool refreshExisting)
         {
             if (pendingSessionPaths.Count == 0)
             {
@@ -1227,8 +1281,22 @@ public sealed class CodexSessionMonitor : IDisposable
                     trackers[path] = new SessionTracker(path);
                     changed = true;
                 }
+                else if (refreshExisting)
+                {
+                    changed = trackers[path].Refresh() || changed;
+                }
+                SuspendOldActivity(trackers[path]);
             }
             return changed;
+        }
+
+        private void SuspendOldActivity(SessionTracker tracker)
+        {
+            if (processLifecycleBaselineUtc != DateTime.MinValue &&
+                tracker.Snapshot.LastEventUtc <= processLifecycleBaselineUtc)
+            {
+                tracker.SuspendActiveTurn();
+            }
         }
 
         public AggregateSnapshot GetAggregate(HaloSettings settings)
@@ -1239,15 +1307,23 @@ public sealed class CodexSessionMonitor : IDisposable
         internal AggregateSnapshot GetAggregate(HaloSettings settings,
             bool codexRunning)
         {
+            List<SessionSnapshot> recent;
+            return ReadSnapshot(settings, codexRunning, DateTime.UtcNow,
+                out recent);
+        }
+
+        internal AggregateSnapshot ReadSnapshot(HaloSettings settings,
+            bool codexRunning, DateTime now, out List<SessionSnapshot> recent)
+        {
             lock (sync)
             {
-                DateTime now = DateTime.UtcNow;
                 List<SessionSnapshot> rawSessions = trackers.Values
                 .Select(delegate(SessionTracker tracker)
                 {
                     return CloneSnapshot(tracker.Snapshot);
                 })
                 .ToList();
+                recent = SelectRecentSessions(rawSessions, now);
                 List<SessionSnapshot> sessions = SelectVisibleSessions(
                     rawSessions, settings, codexRunning, now);
 
@@ -1420,19 +1496,25 @@ public sealed class CodexSessionMonitor : IDisposable
         {
             lock (sync)
             {
-                return trackers.Values.Select(delegate(SessionTracker tracker)
+                return SelectRecentSessions(trackers.Values.Select(delegate(SessionTracker tracker)
                 {
                     return CloneSnapshot(tracker.Snapshot);
-                })
+                }), DateTime.UtcNow);
+            }
+        }
+
+        private static List<SessionSnapshot> SelectRecentSessions(
+            IEnumerable<SessionSnapshot> snapshots, DateTime nowUtc)
+        {
+            return snapshots
                 .Where(delegate(SessionSnapshot snapshot)
                 {
-                    return snapshot.LastEventUtc >= DateTime.UtcNow.AddHours(-24);
+                    return snapshot.LastEventUtc >= nowUtc.AddHours(-24);
                 })
                 .OrderBy(delegate(SessionSnapshot snapshot) { return StatePriority(snapshot.State); })
                 .ThenByDescending(delegate(SessionSnapshot snapshot) { return snapshot.LastEventUtc; })
                 .Take(8)
                 .ToList();
-            }
         }
 
         private static SessionSnapshot CloneSnapshot(SessionSnapshot snapshot)
@@ -1513,12 +1595,35 @@ public sealed class CodexRealtimeActivityReader
 
         public bool TryReadActive(out HaloState state, out string action)
         {
+            return TryReadActive(DateTime.MinValue, out state, out action);
+        }
+
+        internal bool TryReadActive(DateTime notBeforeUtc, out HaloState state,
+            out string action)
+        {
             state = HaloState.Working;
             action = String.Empty;
-            long cutoff = DateTimeOffset.UtcNow.AddMinutes(-5).ToUnixTimeSeconds();
+            DateTime cutoffUtc = DateTime.UtcNow.AddMinutes(-5);
+            if (notBeforeUtc > DateTime.MinValue)
+            {
+                DateTime lifecycleCutoffUtc = notBeforeUtc.ToUniversalTime();
+                if (lifecycleCutoffUtc > cutoffUtc)
+                {
+                    cutoffUtc = lifecycleCutoffUtc;
+                }
+            }
+            long cutoffSeconds = new DateTimeOffset(cutoffUtc)
+                .ToUnixTimeSeconds();
+            long cutoffNanos = (cutoffUtc.Ticks -
+                DateTimeOffset.FromUnixTimeSeconds(cutoffSeconds).UtcDateTime.Ticks) * 100L;
+            // Keep sub-second precision so an old row in the same Unix second
+            // cannot cross a process-lifecycle boundary.
+            string cutoff = cutoffSeconds.ToString(CultureInfo.InvariantCulture);
+            string nanos = cutoffNanos.ToString(CultureInfo.InvariantCulture);
             string query = "select feedback_log_body from logs where ts >= " +
-                cutoff.ToString(CultureInfo.InvariantCulture) +
-                " and target='codex_api::sse::responses' and " +
+                cutoff + " and (ts > " + cutoff + " or (ts = " + cutoff +
+                " and coalesce(ts_nanos,0) >= " + nanos + ")) and " +
+                "target='codex_api::sse::responses' and " +
                 "feedback_log_body like 'SSE event: {\"type\":\"response.%' " +
                 "order by id desc limit 96;";
             List<string> rows;
@@ -1748,24 +1853,46 @@ public static class CodexRuntimeReader
 
         public static bool IsRunning()
         {
+            bool running;
+            return TryIsRunning(out running) && running;
+        }
+
+        internal static bool TryIsRunning(out bool running)
+        {
+            string[] identities;
+            bool known = TryReadProcessIdentities(out identities);
+            running = identities.Length > 0;
+            return known;
+        }
+
+        internal static bool TryReadProcessIdentities(out string[] identities)
+        {
+            identities = new string[0];
+            List<string> found = new List<string>();
             try
             {
                 Process[] processes = Process.GetProcessesByName("codex");
                 try
                 {
+                    bool unavailable = false;
                     foreach (Process process in processes)
                     {
                         try
                         {
                             if (IsCodexDesktopProcessName(process.ProcessName))
                             {
-                                return true;
+                                found.Add(process.Id.ToString(CultureInfo.InvariantCulture) +
+                                    ":" + process.StartTime.ToUniversalTime().Ticks
+                                        .ToString(CultureInfo.InvariantCulture));
                             }
                         }
                         catch
                         {
+                            unavailable = true;
                         }
                     }
+                    identities = found.ToArray();
+                    return !unavailable;
                 }
                 finally
                 {
@@ -1868,23 +1995,12 @@ public static class RateLimitReader
         private static bool cachedHasMetrics;
         private static bool cacheValid;
         private static long cacheRevision;
-
-        public static bool TryRead(out double fiveHourUsed, out double weeklyUsed)
-        {
-            UsageMetrics metrics;
-            bool result = TryRead(out metrics);
-            fiveHourUsed = metrics.FiveHourUsedPercent;
-            weeklyUsed = metrics.WeeklyUsedPercent;
-            return result && metrics.HasFiveHour && metrics.HasWeekly;
-        }
-
-        public static bool TryReadMonthly(out double monthlyUsed)
-        {
-            UsageMetrics metrics;
-            bool result = TryRead(out metrics);
-            monthlyUsed = metrics.MonthlyUsedPercent;
-            return result && metrics.HasMonthly;
-        }
+        private static string candidateRoot;
+        private static Dictionary<string, CandidateFile> candidateFiles;
+        private static readonly HashSet<string> changedCandidatePaths =
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private static DateTime nextCandidateDiscoveryUtc;
+        private static bool candidateDiscoveryComplete;
 
         // This reader is the passive JSONL fallback for quota and the source of
         // context-window usage. CodexUsageMonitor now obtains current quota from
@@ -1908,13 +2024,6 @@ public static class RateLimitReader
         // If OAuth access is unavailable or the endpoint fails, these snapshots
         // keep the panel useful without turning SQLite chat-content matches into
         // false structured quota records.
-        public static bool TryRead(out UsageMetrics metrics)
-        {
-            bool scanSucceeded;
-            return TryRead(AgentHaloPaths.CodexDataRootDirectory(), out metrics,
-                out scanSucceeded);
-        }
-
         internal static bool TryRead(string codexDataRoot,
             out UsageMetrics metrics, out bool scanSucceeded)
         {
@@ -2000,7 +2109,9 @@ public static class RateLimitReader
                         metrics = parsed;
                         if (scanSucceeded)
                         {
-                            scanSucceeded = CacheResult(rootPath, signature,
+                            // A concurrent file event can prevent cache reuse;
+                            // it does not invalidate this successfully read snapshot.
+                            CacheResult(rootPath, signature,
                                 candidates, parsed, hasMetrics, scanRevision);
                         }
                         if (!scanSucceeded && priorMetrics != null)
@@ -2016,7 +2127,7 @@ public static class RateLimitReader
             bool foundMetrics = HasAnyMetrics(parsed);
             if (scanSucceeded)
             {
-                scanSucceeded = CacheResult(rootPath, signature, candidates,
+                CacheResult(rootPath, signature, candidates,
                     parsed, foundMetrics, scanRevision);
             }
             if (!scanSucceeded && priorMetrics != null)
@@ -2079,7 +2190,16 @@ public static class RateLimitReader
             }
             lock (cacheSync)
             {
+                string rootPath = candidateRoot ?? cachedRoot;
+                if (rootPath == null || !fullPath.StartsWith(
+                    rootPath.TrimEnd(Path.DirectorySeparatorChar) +
+                        Path.DirectorySeparatorChar,
+                    StringComparison.OrdinalIgnoreCase))
+                {
+                    return;
+                }
                 cacheRevision++;
+                changedCandidatePaths.Add(fullPath);
                 if (cachedPaths != null && cachedPaths.Any(delegate(string candidate)
                     {
                         return String.Equals(candidate, fullPath,
@@ -2107,19 +2227,35 @@ public static class RateLimitReader
 
             lock (cacheSync)
             {
-                cacheRevision++;
-                if (rootPath != null && cachedRoot != null &&
-                    !String.Equals(cachedRoot, rootPath,
+                string currentRoot = candidateRoot ?? cachedRoot;
+                if (rootPath != null && currentRoot != null &&
+                    !String.Equals(currentRoot, rootPath,
                         StringComparison.OrdinalIgnoreCase))
                 {
                     return;
                 }
+                cacheRevision++;
+                candidateRoot = null;
+                candidateFiles = null;
+                changedCandidatePaths.Clear();
+                nextCandidateDiscoveryUtc = DateTime.MinValue;
+                candidateDiscoveryComplete = false;
                 cachedRoot = null;
                 cachedSignature = null;
                 cachedPaths = null;
                 cachedMetrics = null;
                 cachedHasMetrics = false;
                 cacheValid = false;
+            }
+        }
+
+        internal static void InvalidateCandidates()
+        {
+            lock (cacheSync)
+            {
+                nextCandidateDiscoveryUtc = DateTime.MinValue;
+                cacheValid = false;
+                cacheRevision++;
             }
         }
 
@@ -2134,64 +2270,74 @@ public static class RateLimitReader
             try
             {
                 rootPath = Path.GetFullPath(codexDataRoot);
-                List<CandidateFile> all = new List<CandidateFile>();
-                string[] roots =
+                lock (cacheSync)
                 {
-                    Path.Combine(rootPath, "sessions"),
-                    Path.Combine(rootPath, "archived_sessions")
-                };
-                foreach (string root in roots)
-                {
-                    string[] paths;
-                    try
+                    if (!String.Equals(candidateRoot, rootPath,
+                        StringComparison.OrdinalIgnoreCase))
                     {
-                        paths = Directory.GetFiles(root, "*.jsonl",
-                            SearchOption.AllDirectories);
+                        candidateRoot = rootPath;
+                        candidateFiles = new Dictionary<string, CandidateFile>(
+                            StringComparer.OrdinalIgnoreCase);
+                        changedCandidatePaths.Clear();
+                        nextCandidateDiscoveryUtc = DateTime.MinValue;
+                        candidateDiscoveryComplete = false;
                     }
-                    catch (DirectoryNotFoundException)
+                    DateTime nowUtc = DateTime.UtcNow;
+                    if (nowUtc >= nextCandidateDiscoveryUtc)
                     {
-                        continue;
-                    }
-                    catch (FileNotFoundException)
-                    {
-                        continue;
-                    }
-                    catch
-                    {
-                        scanSucceeded = false;
-                        continue;
-                    }
-                    foreach (string path in paths)
-                    {
-                        try
+                        Dictionary<string, CandidateFile> discovered =
+                            new Dictionary<string, CandidateFile>(
+                                StringComparer.OrdinalIgnoreCase);
+                        foreach (string directory in new[] {
+                            Path.Combine(rootPath, "sessions"),
+                            Path.Combine(rootPath, "archived_sessions") })
                         {
-                            FileInfo info = new FileInfo(path);
-                            info.Refresh();
-                            if (!info.Exists)
+                            try
+                            {
+                                foreach (string path in Directory.GetFiles(directory,
+                                    "*.jsonl", SearchOption.AllDirectories))
+                                {
+                                    UpdateCandidate(discovered, path,
+                                        ref scanSucceeded);
+                                }
+                            }
+                            catch (DirectoryNotFoundException) { }
+                            catch (FileNotFoundException) { }
+                            catch
                             {
                                 scanSucceeded = false;
-                                continue;
                             }
-                            all.Add(new CandidateFile
-                            {
-                                Path = Path.GetFullPath(path),
-                                Length = info.Length,
-                                LastWriteUtc = info.LastWriteTimeUtc
-                            });
                         }
-                        catch
+                        if (scanSucceeded)
                         {
-                            scanSucceeded = false;
+                            candidateFiles = discovered;
                         }
+                        candidateDiscoveryComplete = scanSucceeded;
+                        nextCandidateDiscoveryUtc = nowUtc.AddSeconds(
+                            scanSucceeded ? 30 : 10);
                     }
-                }
-                candidates = all
-                    .OrderByDescending(delegate(CandidateFile candidate)
+                    scanSucceeded = candidateDiscoveryComplete;
+
+                    HashSet<string> refreshPaths = new HashSet<string>(
+                        changedCandidatePaths, StringComparer.OrdinalIgnoreCase);
+                    changedCandidatePaths.Clear();
+                    foreach (CandidateFile candidate in candidateFiles.Values
+                        .OrderByDescending(delegate(CandidateFile file)
+                        { return file.LastWriteUtc; })
+                        .Take(GeneratedHaloSpec.RateLimitRecentFileCount))
                     {
-                        return candidate.LastWriteUtc;
-                    })
-                    .Take(GeneratedHaloSpec.RateLimitRecentFileCount)
-                    .ToList();
+                        refreshPaths.Add(candidate.Path);
+                    }
+                    foreach (string path in refreshPaths)
+                    {
+                        UpdateCandidate(candidateFiles, path, ref scanSucceeded);
+                    }
+                    candidates = candidateFiles.Values
+                        .OrderByDescending(delegate(CandidateFile candidate)
+                        { return candidate.LastWriteUtc; })
+                        .Take(GeneratedHaloSpec.RateLimitRecentFileCount)
+                        .ToList();
+                }
 
                 StringBuilder signatureBuilder = new StringBuilder();
                 foreach (CandidateFile candidate in candidates)
@@ -2212,7 +2358,44 @@ public static class RateLimitReader
             }
         }
 
-        private static bool CacheResult(string rootPath, string signature,
+        private static void UpdateCandidate(
+            IDictionary<string, CandidateFile> files, string path,
+            ref bool scanSucceeded)
+        {
+            try
+            {
+                FileInfo info = new FileInfo(path);
+                info.Refresh();
+                if (!info.Exists)
+                {
+                    // Exists suppresses access errors; distinguish those from deletion.
+                    File.GetAttributes(path);
+                    info.Refresh();
+                }
+                string fullPath = Path.GetFullPath(path);
+                files[fullPath] = new CandidateFile
+                {
+                    Path = fullPath,
+                    Length = info.Length,
+                    LastWriteUtc = info.LastWriteTimeUtc
+                };
+            }
+            catch (FileNotFoundException)
+            {
+                files.Remove(path);
+            }
+            catch (DirectoryNotFoundException)
+            {
+                files.Remove(path);
+            }
+            catch
+            {
+                scanSucceeded = false;
+                changedCandidatePaths.Add(path);
+            }
+        }
+
+        private static void CacheResult(string rootPath, string signature,
             IList<CandidateFile> candidates, UsageMetrics metrics,
             bool hasMetrics, long expectedRevision)
         {
@@ -2220,7 +2403,7 @@ public static class RateLimitReader
             {
                 if (cacheRevision != expectedRevision)
                 {
-                    return false;
+                    return;
                 }
                 cachedRoot = rootPath;
                 cachedSignature = signature;
@@ -2231,7 +2414,6 @@ public static class RateLimitReader
                 cachedMetrics = CloneMetrics(metrics);
                 cachedHasMetrics = hasMetrics;
                 cacheValid = true;
-                return true;
             }
         }
 

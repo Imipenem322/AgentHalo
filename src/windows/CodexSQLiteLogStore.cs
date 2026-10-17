@@ -30,13 +30,6 @@ internal sealed class CodexSQLiteLogStore : IDisposable
             get { return databasePath; }
         }
 
-        public List<string> QueryText(string query)
-        {
-            List<string> rows = new List<string>();
-            TryQueryText(query, out rows);
-            return rows;
-        }
-
         internal bool TryQueryText(string query, out List<string> rows)
         {
             rows = new List<string>();
