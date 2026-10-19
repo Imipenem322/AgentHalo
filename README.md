@@ -1,48 +1,60 @@
-# Agent Halo
+# Agent Halo DSH
 
-`v0.16.5` · English | [简体中文](README.zh-CN.md)
+`0.16.5` · English | [简体中文](README.zh-CN.md)
 
-<img src="assets/agent-halo-windows-preview.png" alt="Agent Halo Windows details panel" width="594">
-
-A desktop halo showing coding agent activity. Windows supports Codex and DeepSeek Harness (DSH); the macOS development build supports Codex.
+A Windows-only DeepSeek Harness desktop plugin with a native activity halo. It shows the current DSH task status, title, and main-agent model while preserving the existing halo animation and controls.
 
 Based on [NePixe1/AgentHalo](https://github.com/NePixe1/AgentHalo), under the [MIT License](LICENSE).
 
-## Features
+## Install from DSH
 
-- Codex task status, context usage, model, and current-turn tokens. Official OAuth mode also shows available 5-hour and weekly quotas.
-- DSH task status, task title, and main-agent model.
-- Completion reminders last up to five minutes and yield to new activity. Prompts waiting for user action have no completion timeout.
-- Dragging with edge snapping, always on top, pause, launch at login, and 75%, 100%, or 125% sizing.
+The GitHub installation address is not available yet. A stable installation commit must include the prebuilt `dist/windows/AgentHalo.Dsh.exe`; a CI build artifact by itself is not part of a GitHub repository install.
 
-## Use on Windows
+After that commit is published, open DSH **Plugins → Add plugin** and enter its immutable commit address:
 
-Requires Windows 10/11 and .NET Framework 4.8. Extract `outputs/AgentHalo-Windows-v0.16.5.zip`, keep the files together, and run `AgentHalo.exe`. Hover for details; right-click to switch agents or change settings.
+```text
+github:Imipenem322/AgentHalo#<full-release-commit-sha>
+```
 
-Codex is the default monitor. When a DSH desktop profile is first ready, Agent Halo registers its bundled observer and selects DSH. Later launches preserve your choice. See the [DSH integration guide](docs/DEEPSEEK_HARNESS_INTEGRATION.zh-CN.md) for setup and removal. Full monitoring of real DSH tasks has not yet been verified.
+Then enable **dsh-agenthalo**, the name shown in the plugin manager. This development branch targets DSH Desktop `0.2.1-rc.2`, Windows 10/11, and .NET Framework 4.8. The `0.16.5` Windows build and focused DSH self-test have passed, and the halo is visible during a real task. Approval handling, macOS, CPU impact, and multi-host handover remain unverified; see the [integration guide](docs/DEEPSEEK_HARNESS_INTEGRATION.zh-CN.md).
 
-The package is unsigned, so SmartScreen may appear on first launch. The EXE checksum is in `SHA256.txt`.
+## What it does
 
-## Build and check
+- Shows DSH task status, title, and main-agent model ID.
+- Preserves dragging, edge snapping, always-on-top, pause, sizing, and the existing animation behavior.
+- Keeps its settings and runtime files under `%LOCALAPPDATA%\AgentHaloDSH`, separate from the full AgentHalo app.
+- Starts and stops its own native halo with the DSH plugin lifecycle.
 
-Run from the repository root. On Windows, use PowerShell:
+The observer does not persist prompt or message bodies, tool arguments, or tool result bodies. It does not submit model requests or contact account endpoints. The full AgentHalo observer has a different plugin ID and is not removed or migrated by this package; see the integration guide if that older observer is already registered in your DSH profile.
+
+## Build a local package
+
+Run from the repository root in PowerShell on Windows:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\build-windows.ps1
-.\outputs\AgentHalo\AgentHalo.exe --self-test .\outputs\self-test.txt
-Get-Content .\outputs\self-test.txt
+$stageRoot = Join-Path $env:TEMP 'agenthalo-dsh-stage'
+.\scripts\build-windows.ps1 -OutputRoot $stageRoot
 ```
 
-The build produces `outputs/AgentHalo/` and a ZIP alongside it. The self-test should report `PASS`.
+The installable package is staged at `$stageRoot\dsh-agenthalo`, with the executable and locales under `dist\windows`. The command does not create a ZIP or checksum by default. Add `-CreateArchive` only when a ZIP is specifically needed. To run the DSH-specific self-test and read its result after the executable exits:
 
-On macOS, use macOS 13+ and Swift 6:
-
-```bash
-bash ./scripts/run-macos.sh --verify
+```powershell
+$exe = Join-Path $stageRoot 'dsh-agenthalo\dist\windows\AgentHalo.Dsh.exe'
+$selfTestOutput = Join-Path $env:TEMP 'agenthalo-dsh-self-test.txt'
+$selfTest = Start-Process -FilePath $exe `
+  -ArgumentList @('--dsh-self-test', "`"$selfTestOutput`"") `
+  -WindowStyle Hidden -Wait -PassThru
+if ($selfTest.ExitCode -ne 0) {
+  throw "DSH self-test failed with exit code $($selfTest.ExitCode)"
+}
+if (-not (Test-Path -LiteralPath $selfTestOutput -PathType Leaf)) {
+  throw 'DSH self-test did not write its output file.'
+}
+Get-Content -LiteralPath $selfTestOutput
 ```
 
-Shared checks are in the [CI configuration](.github/workflows/ci.yml). State and animation details are documented for [Windows](docs/WINDOWS_VISUAL_BEHAVIOR.md) and [macOS](docs/MACOS_VISUAL_BEHAVIOR.md).
+CI checks the plugin JavaScript syntax, builds the Windows package, and runs that focused DSH self-test. Shared contract checks run when shared specs, locales, or their check scripts change. The workflow does not run the full Codex suite or macOS build on this branch.
 
 ## Data access
 
-Monitoring reads local logs or DSH plugin snapshots without uploading session content. The DSH plugin neither submits model requests nor collects conversation text. Official Codex quota refresh uses the existing OAuth login to contact official endpoints.
+The plugin reads DSH's local live-agent projections and writes a bounded status snapshot for its native process. It does not save conversation text or tool payloads. No session content is uploaded.

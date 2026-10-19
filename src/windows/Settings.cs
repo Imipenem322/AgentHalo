@@ -49,10 +49,10 @@ public sealed class HaloSettings
         {
             AlwaysOnTop = true;
             HaloScalePercent = 100;
-            FocusedAgent = "codex";
+            FocusedAgent = "deepseek-harness";
             EnabledAgents = new List<string>
             {
-                "codex"
+                "deepseek-harness"
             };
             InstalledAt = DateTime.UtcNow.ToString("o");
             Acknowledged = new Dictionary<string, string>();
@@ -379,9 +379,54 @@ public static class SettingsStorage
                     {
                     }
                 }
+                string dshHome = Environment.GetEnvironmentVariable(
+                    "AGENTHALO_DSH_HOME");
+                if (dshHome != null)
+                {
+                    if (!IsFullyQualifiedWindowsPath(dshHome))
+                    {
+                        throw new InvalidOperationException(
+                            "AGENTHALO_DSH_HOME must be set to a fully qualified absolute path.");
+                    }
+                    return Path.GetFullPath(dshHome);
+                }
                 string root = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-                return Path.Combine(root, "CodexHalo");
+                return Path.Combine(root, "AgentHaloDSH");
             }
+        }
+
+        private static bool IsFullyQualifiedWindowsPath(string path)
+        {
+            if (String.IsNullOrWhiteSpace(path))
+            {
+                return false;
+            }
+            bool drivePath = path.Length >= 3 &&
+                ((path[0] >= 'A' && path[0] <= 'Z') ||
+                    (path[0] >= 'a' && path[0] <= 'z')) &&
+                path[1] == ':' &&
+                (path[2] == '\\' || path[2] == '/');
+            if (drivePath)
+            {
+                return true;
+            }
+
+            bool uncPath = path.StartsWith("\\\\",
+                StringComparison.Ordinal) || path.StartsWith("//",
+                    StringComparison.Ordinal);
+            if (!uncPath)
+            {
+                return false;
+            }
+
+            int serverSeparator = path.IndexOfAny(new[] { '\\', '/' }, 2);
+            if (serverSeparator <= 2)
+            {
+                return false;
+            }
+            int shareStart = serverSeparator + 1;
+            return shareStart < path.Length && path[shareStart] != '\\' &&
+                path[shareStart] != '/';
         }
 
         public static string SettingsPath
@@ -391,12 +436,13 @@ public static class SettingsStorage
 
         public static HaloSettings Load()
         {
+            string settingsPath = SettingsPath;
             try
             {
-                if (File.Exists(SettingsPath))
+                if (File.Exists(settingsPath))
                 {
                     HaloSettings result = Serializer.Deserialize<HaloSettings>(
-                        File.ReadAllText(SettingsPath, Encoding.UTF8));
+                        File.ReadAllText(settingsPath, Encoding.UTF8));
                     if (result != null)
                     {
                         bool repaired = false;

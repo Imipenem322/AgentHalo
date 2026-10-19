@@ -1,112 +1,98 @@
-# DeepSeek Harness 桌面端集成
+# DeepSeek Harness 桌面端插件
 
-Agent Halo Windows `0.16.5` 默认选择 Codex。首次使用 DSH 时，Agent Halo 会等待 DSH 的 desktop profile 初始化完成，然后从程序包释放观察插件并将其登记到该 profile。首次登记成功后，Agent Halo 自动启用并选择 DSH；之后保留用户在 Agent Halo 中的选择。无需下载额外插件，也无需手动编辑 DSH 的 JSON/YAML 配置。DSH 需要与 Agent Halo 在同一 Windows 用户账户下运行。
+Agent Halo DSH 是一个 Windows 专用的 DSH 桌面插件。插件负责启动和关闭原生状态光环；光环只读取 DSH 快照，不连接 Codex 会话或账户接口。
 
-观察插件通过 DSH 官方 Cordis 插件入口读取当前 Host 的主会话与显式子代理关系，并把本地状态提供给 Agent Halo。插件不提交模型请求、不调用账户接口，也不收集或保存提示词、消息正文、工具参数和工具结果正文。详情面板显示任务名称和主代理模型。真实模型任务场景尚未完成端到端联调，DSH 窗口激活也未实现；因此当前资料说明的是可配置的实验性集成和验证边界，不代表真实任务已验证可用。
+当前开发分支面向 DSH Desktop `0.2.1-rc.2`。Windows `0.16.5` 原生程序构建和 DSH 专项自检已通过，实际 DSH 窗口中也确认了光环可见。真实任务状态、子代理、用户问题等待以及插件管理器停用/重新启用/卸载已完成端到端验收；审批、macOS、CPU 影响及多 Host 接管仍未验收。**目前尚无可供用户安装的 GitHub 发布提交**：正式提交必须包含预编译的 `dist/windows/AgentHalo.Dsh.exe` 及其所需文件。CI 产生的构建结果不会自动进入 GitHub 仓库安装内容。
 
-## 工作方式
+## 安装
 
-插件源码位于 `src/integrations/deepseek-harness/`，并随 Windows 程序包内嵌。运行时，Agent Halo 将入口文件释放到 `%LOCALAPPDATA%\CodexHalo\integrations\deepseek-harness\observer\index.mjs`，并通过 DSH 官方 Cordis patch 热加载入口登记它。登记会按插件唯一 ID 幂等执行，迁移本插件旧路径时保留 profile 中的其他配置。观察插件注册一个纯投影，在 `turn/start`、`turn/end`、工具调用/结果、审批以及请求头等会话事件上维护精简状态，并每 2 秒发布一份完整 JSON 快照：
+发布提交准备好后：
+
+1. 在 DSH 中打开 **Plugins → Add plugin**。
+2. 输入固定到完整发布提交 SHA 的 GitHub 安装规格：
+
+   ```text
+   github:Imipenem322/AgentHalo#<完整发布提交 SHA>
+   ```
+
+3. 安装并启用插件管理器中显示的 **dsh-agenthalo**。
+
+使用包含 EXE 的发布提交。开发分支或不含 `dist/windows/AgentHalo.Dsh.exe` 的提交不能视为安装即用。
+
+启用后，插件会启动包内的 `AgentHalo.Dsh.exe`。正常释放时会清理本次快照，独立设置和按版本缓存的程序会保留。已通过 DSH 插件管理器实测停用、重新启用和启用状态下卸载：停用后开关关闭、旧 helper 消失且 Host 快照数归零；重新启用后新 helper 启动并生成 `baselineReady=true` 快照；卸载后 profile 中的依赖和 bundle 均移除，helper 消失且 Host 快照数归零。卸载会保留本地独立设置和版本缓存。本插件不会改写 DSH profile 来自动登记旧式 observer。
+
+## 运行文件与设置
+
+GitHub 插件包中的入口和 Cordis patch 位于 `src/integrations/deepseek-harness/`；原生程序与语言文件位于 `dist/windows/`。语言文件 `locales/zh.json` 和 `locales/en.json` 必须与 EXE 一起保留。
+
+默认数据目录为：
 
 ```text
-%LOCALAPPDATA%\CodexHalo\integrations\deepseek-harness\runtime\<instanceId>.json
+%LOCALAPPDATA%\AgentHaloDSH\
 ```
 
-插件只用 `ctx.agents.roots()` 和 `ctx.agents.list()` 找当前 Host 的 live Agents，并通过官方 `sessionProjections.snapshot(session)` 读取同一事件序号上的投影基线。它沿着 `subagentCatalog` 明确列出的子会话递归归并；普通 fork 不会因此归到父任务。该投影的 wire 子项名称是 `id`（源事件写作 `childId`）。catalog 可能保留已完成子代理；如果该 `id` 不在当前 Host 的 live Agent 集合中，就作为 inactive 叶节点处理，不读取它的冷历史投影。主任务标题、轮次、实际模型、下一模型和终态只取根会话；工具、审批、未继续的问题和运行状态按根及已列出的 live 子代理累计。`userQuestions.active` 中仅 `state: "open"` 计为阻塞，`continued` 不计。
+其中设置、运行快照和按应用版本缓存的程序各自位于此目录的子目录。启动器按包版本缓存原生程序，并复用同一版本已有的 EXE。发布内容中的 EXE 有变化时必须提升包版本，避免用户继续复用旧缓存。开发期间如果在同一版本替换了 EXE，应先退出 DSH 和光环进程，再只清除隔离测试数据目录中的 `app\<版本号>` 缓存后重新启用；不要清理用户默认数据目录。需要使用其他数据位置时，可在启动 DSH 前将 `AGENTHALO_DSH_HOME` 设置为绝对路径；相对路径不受支持。插件会把相同路径传给原生程序。
 
-实际请求模型来自根会话的 `request/header`，并关联当前根轮次；下一次模型选择来自根会话的 `modelSelection`。模型名称目录不读取，`name` 留空，由 AgentHalo 显示 `modelId`。
+独立设置目录与应用实例标识允许 DSH 专用版和完整版 AgentHalo 共存。DSH 专用版只提供 DSH 状态，不显示 Codex 选择、会话、额度或 SQLite 数据。它保留现有光环的动画、拖动、缩放、置顶、暂停和语言设置功能。
 
-## 快照 v1
+## 旧版 observer 共存
 
-快照包含 Host 身份、快照修订、能力和任务集合。下面是结构示例，标题和模型值均为虚构：
+旧版完整版 AgentHalo 曾将 `agenthalo-deepseek-harness-observer` 写入 DSH 的 Cordis patch。新插件 ID 为 `agenthalo-dsh`；它不会覆盖、移除或迁移旧 ID，也不会读取旧 observer 写入的快照。
 
-```json
-{
-  "schemaVersion": 1,
-  "bridgeVersion": "1.0.0",
-  "dshVersion": "0.2.0-rc.2",
-  "profile": "desktop",
-  "instanceId": "<uuid>",
-  "hostPid": 1234,
-  "hostStartUtc": "2026-10-01T02:00:00.000Z",
-  "hostExecutable": "D:\\deepseek harness\\DeepSeek Harness.exe",
-  "hostParentPid": 1200,
-  "hostRuntime": "electron-node",
-  "desktopAppId": "com.deepseek.dsh",
-  "hostProfileDir": "C:\\Users\\<user>\\.dsh\\profiles\\desktop",
-  "hostRuntimeDir": "D:\\deepseek harness\\resources\\app.asar\\dsh",
-  "revision": 7,
-  "publishedAtUtc": "2026-10-01T02:00:02.000Z",
-  "baselineReady": true,
-  "capabilities": {
-    "lifecycle": true,
-    "toolName": true,
-    "attention": true,
-    "subagents": true,
-    "actualModel": true,
-    "nextModel": true
-  },
-  "tasks": [
-    {
-      "rootSessionId": "<session-id>",
-      "title": "示例任务",
-      "turnId": "12",
-      "running": true,
-      "rootRunning": true,
-      "relatedRunning": 1,
-      "relationsResolved": true,
-      "activeToolCount": 1,
-      "activeToolNames": ["bash"],
-      "pendingApprovalCount": 0,
-      "blockingQuestionCount": 0,
-      "lastActivityUtc": "2026-10-01T02:00:01.000Z",
-      "mainModel": {
-        "providerId": "deepseek",
-        "modelId": "example-model",
-        "name": null,
-        "source": "actual-request",
-        "turnId": "12",
-        "requestId": null,
-        "observedAtUtc": "2026-10-01T02:00:01.000Z"
-      },
-      "nextModel": null,
-      "terminal": null
-    }
-  ]
-}
-```
+如果同一个 DSH profile 仍登记旧 observer，两者会同时加载。要移除旧 observer，请先按旧版接入说明停用完整版 AgentHalo，再从 profile 的 `cordis.patch.yml` 中删除仅属于 `agenthalo-deepseek-harness-observer` 的插入项；保留同一文件中的其他插件配置。不要删除整个 DSH profile 或整份 `cordis.patch.yml`。
 
-文件上限为 2 MiB、任务上限为 512。快照保留当前 Host 的根 Agent（包括待机根任务），并保留近期根终态。达到边界后先去除过期终态和非必要待机会话，尽可能保留最近一个待机根任务；仍超限时写入较小的 `baselineReady: false` 快照，不截断活动任务并谎报完整。计数缺少可靠投影时写 `null`，由 Provider 显示未知。心跳只推进 `revision` 与 `publishedAtUtc`，不更新时间或终态。
+## 状态与隐私
 
-## 首次使用
+插件从 DSH 当前 Host 的活动 Agent 和会话投影读取任务状态、标题和主代理模型，并通过本地有界快照交给光环。它不提交模型请求，不保存提示词、消息正文、工具参数或工具结果正文，也不会上传会话内容。快照只用于本机状态显示。
 
-普通安装只需把 Windows ZIP 完整解压，然后在同一个 Windows 用户账户下运行 DSH 和 `AgentHalo.exe`。如果 DSH 已经创建过 desktop profile，Agent Halo 检测就绪后会自动安装观察插件；如果 Agent Halo 先启动，它每 5 秒检查一次并等待 DSH 首次创建 profile。profile 就绪后，Agent Halo 将插件释放到本机 `%LOCALAPPDATA%\CodexHalo\integrations\deepseek-harness\observer\index.mjs`，并通过 DSH 官方 Cordis patch 入口登记。此过程会保留 DSH profile 的其他插件和配置。
+## 验收状态
 
-DSH 默认 profile 位于 `%USERPROFILE%\.dsh\profiles\desktop`。如设置了 `DSH_HOME`，请将它设为**绝对路径**，或以 `~/` 开头的路径；Agent Halo 会展开 `~/`，profile 位于该目录下的 `profiles\desktop`。不要使用相对路径，以免 Halo 与 DSH 的工作目录差异导致它们指向不同 profile。
+已验收的 Windows 场景包括：`0.16.5` 原生程序构建和 DSH 专项自检；实际 DSH 窗口中的光环显示；真实根任务从 `Healthy / EXECUTING` 到 `COMPLETE` 的状态变化；子代理 `relatedRunning` 从 `0` 到 `1` 再回到 `0`；根任务标题和实际主模型 `deepseek-flash` 保持正确。另已复验旧式 `ask_user_question` 能显示为 `Healthy / NEEDS YOU` 且 `blockingQuestionCount=1`。强制结束隔离的 Desktop 后，Host 和光环进程均退出，重新启动后状态恢复。
 
-首次自动登记成功后，Agent Halo 会自动启用并选择 `deepseek-harness`，同时记录首次设置已完成。此前已手动启用 DSH 的用户保留原来的选择。后续启动会保留你在 Agent Halo 中的选择；如果之后切回 Codex，Agent Halo 不会再自动切走。官方 DSH Host 会热加载 patch，正常情况下无需手动重启。若 15 秒内仍未连上，光环会提示启动或重启 DSH。DSH 仍未安装或尚未初始化 profile 时，完成这两步后保持 Agent Halo 开启并等待自动接入即可。
+审批流程、macOS、CPU 影响测量和多 Host 所有权接管尚未验收。GitHub 安装也要等包含原生程序的发布提交完成后再验证。编译、自检或空闲快照不能替代这些项目的验收。
 
-连接成功后，DSH 详情面板会显示任务标题和主代理模型 ID。可选用随程序提供的只读诊断命令检查连接；它只输出健康状态、能力、任务数量及标题/模型是否存在，不输出标题、模型字符串或会话正文：
+## 本地构建与专项检查
+
+在 Windows PowerShell 的仓库根目录执行：
 
 ```powershell
-.\AgentHalo.exe --deepseek-snapshot "$env:TEMP\deepseek-snapshot-check.json"
+$stageRoot = Join-Path $env:TEMP 'agenthalo-dsh-stage'
+.\scripts\build-windows.ps1 -OutputRoot $stageRoot
 ```
 
-健康时退出码为 0，其他健康状态为 2。诊断文件可在检查后删除。此步骤仅检查观察链路，不会提交模型请求。
+完整暂存包位于 `$stageRoot\dsh-agenthalo`。默认构建不会生成 ZIP 或 SHA-256 文件；需要 ZIP 时显式添加 `-CreateArchive`。DSH 专项自检命令为：
 
-## 撤销
+```powershell
+$exe = Join-Path $stageRoot 'dsh-agenthalo\dist\windows\AgentHalo.Dsh.exe'
+$selfTestOutput = Join-Path $env:TEMP 'agenthalo-dsh-self-test.txt'
+$selfTest = Start-Process -FilePath $exe `
+  -ArgumentList @('--dsh-self-test', "`"$selfTestOutput`"") `
+  -WindowStyle Hidden -Wait -PassThru
+if ($selfTest.ExitCode -ne 0) {
+  throw "DSH self-test failed with exit code $($selfTest.ExitCode)"
+}
+if (-not (Test-Path -LiteralPath $selfTestOutput -PathType Leaf)) {
+  throw 'DSH 自检没有写入结果文件。'
+}
+Get-Content -LiteralPath $selfTestOutput
+```
 
-若只想暂时回到 Codex，可在 Agent Halo 中选择 Codex，后续启动会保留该选择。若要彻底移除 DSH 观察插件，先退出 Agent Halo，再编辑 `%LOCALAPPDATA%\CodexHalo\settings.json`：从 `EnabledAgents` 移除 `deepseek-harness`，并在需要时把 `FocusedAgent` 改为 `codex`；保留 `DeepSeekHarnessSetupComplete: true`，这样下次启动不会再次自动登记。随后从 DSH desktop profile 的 `cordis.patch.yml` 删除 `id: agenthalo-deepseek-harness-observer` 对应的整段插入项，保留其他内容。若 DSH 没有热卸载插件，等当前任务结束后重启 DSH。不要删除 `.dsh` 目录、profile 文件或其他插件注册项。
+只读快照诊断可将健康摘要写入指定文件，不输出任务标题、模型字符串或会话正文：
 
-## 已核实接口与验证边界
+```powershell
+$snapshotOutput = Join-Path $env:TEMP 'agenthalo-dsh-snapshot.json'
+$snapshot = Start-Process -FilePath $exe `
+  -ArgumentList @('--deepseek-snapshot', "`"$snapshotOutput`"") `
+  -WindowStyle Hidden -Wait -PassThru
+if ($snapshot.ExitCode -ne 0) {
+  throw "DSH snapshot diagnostic failed with exit code $($snapshot.ExitCode)"
+}
+if (-not (Test-Path -LiteralPath $snapshotOutput -PathType Leaf)) {
+  throw 'DSH 快照诊断没有写入结果文件。'
+}
+Get-Content -LiteralPath $snapshotOutput
+```
 
-- 官方固定提交 [`639ed015397290b3745d163aafe02ffee4aa3f84`](https://github.com/deepseek-ai/deepseek-harness/tree/639ed015397290b3745d163aafe02ffee4aa3f84) 的桌面 Host 插件使用 ESM 命名导出 `name`、`apply` 和可选 `inject`；`cordis.patch.yml` 支持 `insert` 及绝对本地插件路径。
-- `sessionProjections.snapshot(session)` 同步返回同一会话事件位置上的投影值和 `asOfSeq`；`agents.roots()/list()` 提供当前 Host 的 live Agent。插件不调用 `sessionController.projections()` 扫描历史会话。
-- `userQuestions` 服务在官方实现中向 `sessionProjections` 注册同名 projection，wire 结构含 `active`、`settled`。若服务或 live 会话基线中缺少该 projection，`attention` 能力或对应计数不会伪报为可用/零。
-- 官方子代理目录的 wire 项以 `id` 表示会话 ID；插件仅按该明确关系聚合，不把通用父会话字段当作子代理关系。
+GitHub 安装提交必须在仓库根目录跟踪对应版本的 `dist/windows/AgentHalo.Dsh.exe` 和 `dist/windows/locales/`。本地暂存包或 CI artifact 不会自动替代这一步。CI 对插件入口和启动器执行一次 Node 语法检查，构建 Windows 包并运行 DSH 专项自检；只有共享规范、语言文件或相应检查脚本改变时才运行共享契约检查。它不例行运行完整 Codex 自测或 macOS 构建。
 
-## 实现状态与验证边界
-
-Agent Halo 自 `0.16.0` 起已包含自动释放与登记观察插件的逻辑，因此新电脑首次运行时不需要从其他电脑复制插件或配置。此前使用隔离的全新 DSH profile 和 Agent Halo 配置，验证了 EXE 首次启动自动登记、启用与选中 DSH；也验证了先启动 DSH 桌面 Host 后再打开 Agent Halo，插件无需重启即可热加载，原生读取器得到 `Healthy / STANDBY`。这些检查没有提交模型请求，证明的是首次接入与空闲状态读取链路。
-
-真实模型回复、工具调用与审批、问题继续、子代理/fork、运行中切换模型、桌面退出或休眠恢复、Host 重启等场景尚未端到端验证。模型目录名称未接入，详情显示模型 ID；DSH 窗口激活尚未实现。不得将空闲快照或离线断言当作真实任务验收。
+普通 README、许可证和说明文档变更不会触发此 Windows 构建流程；CI 的路径过滤保留给插件代码、原生程序、构建脚本和共享契约相关文件。

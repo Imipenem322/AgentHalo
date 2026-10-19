@@ -1,48 +1,60 @@
-# Agent Halo
+# Agent Halo DSH
 
-`v0.16.5` · [English](README.md) | 简体中文
+`0.16.5` · [English](README.md) | 简体中文
 
-<img src="assets/agent-halo-windows-preview.png" alt="Agent Halo Windows 详情面板" width="594">
-
-显示编程代理运行状态的桌面光环。Windows 支持 Codex 和 DeepSeek Harness（DSH）；macOS 开发版支持 Codex。
+一个仅支持 Windows 的 DeepSeek Harness 桌面插件，配有原生状态光环。它显示当前 DSH 任务的状态、名称和主代理模型，同时保留现有光环动画与控制功能。
 
 基于 [NePixe1/AgentHalo](https://github.com/NePixe1/AgentHalo) 修改，采用 [MIT 许可证](LICENSE)。
 
+## 从 DSH 安装
+
+目前还没有可用的 GitHub 安装地址。正式安装提交必须包含预编译文件 `dist/windows/AgentHalo.Dsh.exe`；只有 CI 构建产物并不代表它已进入 GitHub 插件安装内容。
+
+提交发布后，在 DSH 中打开 **Plugins → Add plugin**，输入固定到该提交的地址：
+
+```text
+github:Imipenem322/AgentHalo#<完整发布提交 SHA>
+```
+
+然后在插件管理器中启用界面显示的插件名 **dsh-agenthalo**。当前开发分支面向 DSH Desktop `0.2.1-rc.2`、Windows 10/11 和 .NET Framework 4.8。`0.16.5` Windows 原生程序构建及 DSH 专项自检已通过，真实任务中已确认光环可见。审批流程、macOS、CPU 影响和多 Host 接管尚未验收，详见[集成说明](docs/DEEPSEEK_HARNESS_INTEGRATION.zh-CN.md)。
+
 ## 功能
 
-- Codex：显示任务状态、上下文、模型和本轮 Token；官方 OAuth 模式额外显示可用的 5 小时、每周额度。
-- DSH：显示任务状态、任务名称和主代理模型。
-- 完成提醒最多保留 5 分钟，新任务会立即覆盖；等待用户操作的提醒不受此限。
-- 支持拖动吸附、置顶、暂停、开机启动，以及 75%、100%、125% 三档尺寸。
+- 显示 DSH 任务状态、任务名称和主代理模型 ID。
+- 保留拖动、边缘吸附、置顶、暂停、尺寸调整和现有动画表现。
+- 设置与运行文件保存在 `%LOCALAPPDATA%\AgentHaloDSH`，与完整版 AgentHalo 分开。
+- 随 DSH 插件启停，只管理本插件启动的原生光环。
 
-## 使用（Windows）
+观察插件不会保存提示词或消息正文、工具参数和工具结果正文；也不会提交模型请求或访问账户接口。完整版 AgentHalo 的观察插件使用不同 ID，本包不会自动移除或迁移它。如果你的 DSH profile 已登记旧观察插件，请先阅读[集成说明](docs/DEEPSEEK_HARNESS_INTEGRATION.zh-CN.md)中的共存说明。
 
-需要 Windows 10/11 和 .NET Framework 4.8。解压 `outputs/AgentHalo-Windows-v0.16.5.zip`，保持文件完整，运行 `AgentHalo.exe`。悬停查看详情，右键切换代理或调整设置。
+## 本地构建
 
-默认监测 Codex。首次发现 DSH desktop 配置就绪时，会自动登记内置观察插件并切换到 DSH；之后保留你的选择。接入和撤销方法见 [DSH 接入说明](docs/DEEPSEEK_HARNESS_INTEGRATION.zh-CN.md)。DSH 的真实任务全流程联调尚未完成。
-
-发布包未签名，首次运行可能出现 SmartScreen 提示。EXE 校验值见包内 `SHA256.txt`。
-
-## 构建与检查
-
-在项目根目录执行。Windows 使用 PowerShell：
+在 Windows PowerShell 的仓库根目录执行：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\build-windows.ps1
-.\outputs\AgentHalo\AgentHalo.exe --self-test .\outputs\self-test.txt
-Get-Content .\outputs\self-test.txt
+$stageRoot = Join-Path $env:TEMP 'agenthalo-dsh-stage'
+.\scripts\build-windows.ps1 -OutputRoot $stageRoot
 ```
 
-构建结果位于 `outputs/AgentHalo/` 和同目录的 ZIP，自检应输出 `PASS`。
+可安装目录位于 `$stageRoot\dsh-agenthalo`，EXE 和语言文件位于其中的 `dist\windows`。默认不生成 ZIP 或校验值；确实需要 ZIP 时再加 `-CreateArchive`。可用下面的命令运行 DSH 专项自检；它会等待 EXE 退出、检查实际退出码，再读取结果文件：
 
-macOS 需要 macOS 13+ 和 Swift 6：
-
-```bash
-bash ./scripts/run-macos.sh --verify
+```powershell
+$exe = Join-Path $stageRoot 'dsh-agenthalo\dist\windows\AgentHalo.Dsh.exe'
+$selfTestOutput = Join-Path $env:TEMP 'agenthalo-dsh-self-test.txt'
+$selfTest = Start-Process -FilePath $exe `
+  -ArgumentList @('--dsh-self-test', "`"$selfTestOutput`"") `
+  -WindowStyle Hidden -Wait -PassThru
+if ($selfTest.ExitCode -ne 0) {
+  throw "DSH self-test failed with exit code $($selfTest.ExitCode)"
+}
+if (-not (Test-Path -LiteralPath $selfTestOutput -PathType Leaf)) {
+  throw 'DSH 自检没有写入结果文件。'
+}
+Get-Content -LiteralPath $selfTestOutput
 ```
 
-共享检查见 [CI 配置](.github/workflows/ci.yml)。状态与动画说明见 [Windows](docs/WINDOWS_VISUAL_BEHAVIOR.md) 和 [macOS](docs/MACOS_VISUAL_BEHAVIOR.md)。
+CI 会检查插件 JavaScript 语法、构建 Windows 包，并运行这项 DSH 专项自检。只有共享规范、语言文件或对应检查脚本发生变化时，才运行共享契约检查。该分支不会例行运行完整 Codex 测试或 macOS 构建。
 
 ## 数据访问
 
-状态监测读取本地日志或 DSH 插件快照，不上传会话内容。DSH 插件不提交模型请求，也不采集对话正文。官方 Codex 额度刷新会复用现有 OAuth 登录并访问官方接口。
+插件读取 DSH 本地的活动代理投影，并向原生进程提供有限的状态快照。它不保存会话正文或工具载荷，也不会上传会话内容。

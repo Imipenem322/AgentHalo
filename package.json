@@ -1,0 +1,33 @@
+{
+  "name": "dsh-agenthalo",
+  "version": "0.16.5",
+  "private": true,
+  "description": "Windows-only Agent Halo integration for DeepSeek Harness",
+  "license": "MIT",
+  "type": "module",
+  "main": "./src/integrations/deepseek-harness/index.mjs",
+  "files": [
+    "LICENSE",
+    "README.md",
+    "README.zh-CN.md",
+    "docs/DEEPSEEK_HARNESS_INTEGRATION.zh-CN.md",
+    "package.json",
+    "src/integrations/deepseek-harness/index.mjs",
+    "src/integrations/deepseek-harness/launcher.mjs",
+    "src/integrations/deepseek-harness/package.json",
+    "src/integrations/deepseek-harness/cordis.patch.yml",
+    "dist/windows/AgentHalo.Dsh.exe",
+    "dist/windows/locales/**"
+  ],
+  "os": [
+    "win32"
+  ],
+  "engines": {
+    "dsh": "0.2.1-rc.2"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./src/integrations/deepseek-harness/cordis.patch.yml"
+    }
+  }
+}

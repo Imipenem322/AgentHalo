@@ -25,13 +25,13 @@ using MediaColor = System.Windows.Media.Color;
 using MediaBrush = System.Windows.Media.Brush;
 using MediaPen = System.Windows.Media.Pen;
 using MediaPoint = System.Windows.Point;
-[assembly: System.Reflection.AssemblyTitle("Agent Halo")]
-[assembly: System.Reflection.AssemblyDescription("Ambient desktop status light for coding agents")]
+[assembly: System.Reflection.AssemblyTitle("AgentHalo DSH")]
+[assembly: System.Reflection.AssemblyDescription("Desktop status light for DeepSeek Harness")]
 [assembly: System.Reflection.AssemblyCompany("Agent Halo")]
-[assembly: System.Reflection.AssemblyProduct("Agent Halo")]
-[assembly: System.Reflection.AssemblyVersion("0.16.5.0")]
-[assembly: System.Reflection.AssemblyFileVersion("0.16.5.0")]
-[assembly: System.Reflection.AssemblyInformationalVersion("0.16.5")]
+[assembly: System.Reflection.AssemblyProduct("AgentHalo DSH")]
+[assembly: System.Reflection.AssemblyVersion(CodexHalo.GeneratedHaloSpec.ReleaseVersion + ".0")]
+[assembly: System.Reflection.AssemblyFileVersion(CodexHalo.GeneratedHaloSpec.ReleaseVersion + ".0")]
+[assembly: System.Reflection.AssemblyInformationalVersion(CodexHalo.GeneratedHaloSpec.ReleaseVersion)]
 
 namespace CodexHalo
 {
@@ -43,38 +43,25 @@ public static class Program
         public static int Main()
         {
             string[] args = Environment.GetCommandLineArgs();
-            // Legacy helper invocations must not fall through and start the
-            // interactive monitor after their implementation is removed.
-            if (args.Length >= 2 && args[1].StartsWith(
-                    "--antigravity-", StringComparison.Ordinal))
-            {
-                return 0;
-            }
-            // Older builds may have left AgentHalo hook commands in Claude's
-            // settings. Keep this compatibility no-op so those commands exit
-            // immediately instead of launching the normal Codex-only app.
-            if (args.Length >= 2 && args[1] == "--claude-hook")
-            {
-                return 0;
-            }
-            if (args.Length >= 3 && args[1] == "--self-test")
-            {
-                return Diagnostics.RunSelfTest(args[2]);
-            }
-            if (args.Length >= 3 && args[1] == "--deepseek-snapshot")
-            {
+            if (args.Length == 3 && args[1] == "--dsh-self-test")
+                return Diagnostics.RunDeepSeekSelfTest(args[2]);
+            if (args.Length == 3 && args[1] == "--deepseek-snapshot")
                 return DeepSeekHarnessSnapshotCommand.Run(args[2]);
-            }
-            if (args.Length >= 3 && args[1] == "--snapshot")
-            {
-                return Diagnostics.WriteLiveSnapshot(args[2]);
-            }
-            if (args.Length >= 3 && args[1] == "--usage-snapshot")
-            {
-                return Diagnostics.WriteCodexUsageSnapshot(args[2]);
-            }
 
-            if (args.Length < 2)
+            bool managed = args.Length == 2 && args[1] == "--dsh-managed";
+            if (args.Length != 1 && !managed)
+            {
+                Console.Error.WriteLine("Unsupported AgentHalo DSH arguments.");
+                return 2;
+            }
+            // The inherited pipe belongs only to this plugin activation. EOF
+            // covers both normal disposal and an abruptly terminated Host.
+            if (managed && GetFileType(GetStdHandle(-10)) != 3)
+            {
+                Console.Error.WriteLine("--dsh-managed requires a parent stdin pipe.");
+                return 2;
+            }
+            if (!managed)
             {
                 DetachEphemeralConsole();
             }
@@ -88,45 +75,68 @@ public static class Program
                 e.Handled = true;
             };
 
-            if (args.Length >= 3 && args[1] == "--render-states")
-            {
-                int result = Diagnostics.RenderStates(args[2]);
-                app.Shutdown(result);
-                return result;
-            }
-            if (args.Length >= 3 && args[1] == "--benchmark")
-            {
-                Diagnostics.RunBenchmark(args[2]);
-                app.Run();
-                return 0;
-            }
-
             bool created;
-            mutex = new Mutex(true, "Local\\CodexHalo-9A542DB9-A944-4B38-AED0-84BE7419D0BB",
+            mutex = new Mutex(true, "Local\\AgentHaloDSH-9A542DB9-A944-4B38-AED0-84BE7419D0BB",
                 out created);
             if (!created)
             {
+                mutex.Dispose();
+                return 10;
+            }
+            try
+            {
+                HaloSettings settings;
+                try
+                {
+                    settings = SettingsStorage.Load();
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine("Cannot load AgentHalo DSH settings: " + ex.Message);
+                    return 1;
+                }
+                HaloWindow window = new HaloWindow(settings);
+                app.ShutdownMode = ShutdownMode.OnMainWindowClose;
+                app.MainWindow = window;
+                window.Show();
+                if (managed)
+                {
+                    Thread lifetime = new Thread(delegate()
+                    {
+                        try
+                        {
+                            using (Stream input = Console.OpenStandardInput())
+                            {
+                                byte[] buffer = new byte[64];
+                                while (input.Read(buffer, 0, buffer.Length) != 0) { }
+                            }
+                        }
+                        catch (IOException) { }
+                        finally
+                        {
+                            if (!app.Dispatcher.HasShutdownStarted)
+                                app.Dispatcher.BeginInvoke(new Action(window.Close));
+                        }
+                    });
+                    lifetime.IsBackground = true;
+                    lifetime.Name = "DSH plugin lifetime";
+                    lifetime.Start();
+                }
+                app.Run();
                 return 0;
             }
-
-            HaloSettings settings = SettingsStorage.Load();
-            DeepSeekHarnessSetup deepSeekSetup =
-                settings.DeepSeekHarnessSetupComplete &&
-                !settings.IsAgentEnabled(AgentKind.DeepSeekHarness)
-                    ? null : new DeepSeekHarnessSetup();
-            if (deepSeekSetup != null && deepSeekSetup.TryInstall() &&
-                DeepSeekHarnessSetup.EnableMonitoring(settings))
+            finally
             {
-                SettingsStorage.Save(settings);
+                mutex.ReleaseMutex();
+                mutex.Dispose();
             }
-            HaloWindow window = new HaloWindow(settings, deepSeekSetup);
-            app.ShutdownMode = ShutdownMode.OnMainWindowClose;
-            app.MainWindow = window;
-            window.Show();
-            app.Run();
-            GC.KeepAlive(mutex);
-            return 0;
         }
+
+        [DllImport("kernel32.dll")]
+        private static extern IntPtr GetStdHandle(int handle);
+
+        [DllImport("kernel32.dll")]
+        private static extern uint GetFileType(IntPtr handle);
 
         private static void DetachEphemeralConsole()
         {

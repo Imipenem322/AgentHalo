@@ -120,6 +120,114 @@ public static class Diagnostics
             }
         }
 
+        public static int RunDeepSeekSelfTest(string outputPath)
+        {
+            string directory = Path.Combine(Path.GetTempPath(),
+                "AgentHalo-self-test-app-" + Guid.NewGuid().ToString("N"));
+            string previousDirectory = Environment.GetEnvironmentVariable(
+                "AGENTHALO_DIAGNOSTIC_APP_DIRECTORY");
+            string previousMode = Environment.GetEnvironmentVariable("AGENTHALO_TEST_MODE");
+            Environment.SetEnvironmentVariable("AGENTHALO_TEST_MODE", "1");
+            Environment.SetEnvironmentVariable("AGENTHALO_DIAGNOSTIC_APP_DIRECTORY", directory);
+            try
+            {
+                return RunDeepSeekSelfTestCore(outputPath);
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable("AGENTHALO_DIAGNOSTIC_APP_DIRECTORY", previousDirectory);
+                Environment.SetEnvironmentVariable("AGENTHALO_TEST_MODE", previousMode);
+                TryDeleteSelfTestAppDirectory(directory);
+            }
+        }
+
+        private static int RunDeepSeekSelfTestCore(string outputPath)
+        {
+            try
+            {
+                AgentProviderCatalog catalog = new AgentProviderCatalog();
+                Assert(catalog.Descriptors.Count == 1 &&
+                    catalog.DefaultKind == AgentKind.DeepSeekHarness &&
+                    !catalog.IsRegistered(AgentKind.Codex),
+                    "DSH-only catalog has no Codex provider factory");
+                HaloSettings settings = new HaloSettings();
+                settings.FocusedAgent = "codex";
+                settings.EnabledAgents = new List<string> { "codex" };
+                settings.NormalizeAgentSelection(catalog);
+                Assert(settings.FocusedAgent == "deepseek-harness" &&
+                    settings.EnabledAgents.SequenceEqual(new[] { "deepseek-harness" }),
+                    "legacy selections normalize to the sole DSH provider");
+                Assert(String.Equals(SettingsStorage.AppDirectory,
+                    Environment.GetEnvironmentVariable("AGENTHALO_DIAGNOSTIC_APP_DIRECTORY"),
+                    StringComparison.OrdinalIgnoreCase),
+                    "DSH checks use an isolated settings directory");
+                RunDshHomePathChecks();
+                RunDeepSeekPollingCacheChecks();
+                RunDeepSeekIntegrationStateChecks();
+                File.WriteAllText(outputPath,
+                    "PASS\nDSH-only defaults, settings path contract, selection normalization, polling/cache lifecycle and integration states.\n",
+                    new UTF8Encoding(false));
+                return 0;
+            }
+            catch (Exception ex)
+            {
+                File.WriteAllText(outputPath, "FAIL\n" + ex, new UTF8Encoding(false));
+                return 1;
+            }
+        }
+
+        private static void RunDshHomePathChecks()
+        {
+            string previousDiagnosticDirectory =
+                Environment.GetEnvironmentVariable(
+                    "AGENTHALO_DIAGNOSTIC_APP_DIRECTORY");
+            string previousDshHome = Environment.GetEnvironmentVariable(
+                "AGENTHALO_DSH_HOME");
+            try
+            {
+                Environment.SetEnvironmentVariable(
+                    "AGENTHALO_DIAGNOSTIC_APP_DIRECTORY", null);
+
+                string drivePath = @"C:\AgentHaloDSH-path-check";
+                Environment.SetEnvironmentVariable("AGENTHALO_DSH_HOME",
+                    drivePath);
+                Assert(String.Equals(SettingsStorage.AppDirectory,
+                        Path.GetFullPath(drivePath),
+                        StringComparison.OrdinalIgnoreCase),
+                    "DSH home accepts an absolute drive path");
+
+                string uncPath = @"\\server\share\AgentHaloDSH-path-check";
+                Environment.SetEnvironmentVariable("AGENTHALO_DSH_HOME",
+                    uncPath);
+                Assert(String.Equals(SettingsStorage.AppDirectory,
+                        Path.GetFullPath(uncPath),
+                        StringComparison.OrdinalIgnoreCase),
+                    "DSH home accepts a UNC server and share");
+
+                Environment.SetEnvironmentVariable("AGENTHALO_DSH_HOME",
+                    @"\\server");
+                bool rejected = false;
+                try
+                {
+                    GC.KeepAlive(SettingsStorage.AppDirectory);
+                }
+                catch (InvalidOperationException)
+                {
+                    rejected = true;
+                }
+                Assert(rejected,
+                    "DSH home rejects a UNC path without a share");
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable(
+                    "AGENTHALO_DIAGNOSTIC_APP_DIRECTORY",
+                    previousDiagnosticDirectory);
+                Environment.SetEnvironmentVariable("AGENTHALO_DSH_HOME",
+                    previousDshHome);
+            }
+        }
+
         private static int RunSelfTestCore(string outputPath)
         {
             try
@@ -2500,7 +2608,7 @@ public static class Diagnostics
             {
                 { "schemaVersion", 1 },
                 { "bridgeVersion", "1.0.0" },
-                { "dshVersion", "0.2.0-rc.2" },
+                { "dshVersion", "0.2.1-rc.2" },
                 { "profile", "desktop" },
                 { "instanceId", "review-instance" },
                 { "hostPid", 40001 },

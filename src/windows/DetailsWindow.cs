@@ -181,7 +181,7 @@ public sealed class DetailsWindow : Window
         private readonly RoundedMeter longTermBar;
         private string longTermLabelKey;
         private AgentProviderSnapshot currentSnapshot;
-        private AgentKind selectedAgent;
+        private AgentKind selectedAgent = AgentKind.DeepSeekHarness;
         private bool agentSwitchingEnabled = true;
         private readonly List<AgentProviderDescriptor> enabledAgentDescriptors =
             new List<AgentProviderDescriptor>();
@@ -422,7 +422,7 @@ public sealed class DetailsWindow : Window
             dataLayer.Children.Add(infoGroup);
             dataLayer.Children.Add(deepSeekGroup);
             content.Children.Add(dataLayer);
-            UpdateAgentSelector(AgentKind.Codex);
+            UpdateAgentSelector(AgentKind.DeepSeekHarness);
 
             Grid layers = new Grid();
             layers.Children.Add(content);

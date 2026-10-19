@@ -23,7 +23,7 @@ internal sealed class AgentMonitorCoordinator : IDisposable
         private string lastSwitchError = String.Empty;
 
         public AgentMonitorCoordinator()
-            : this(new AgentProviderCatalog(), AgentKind.Codex,
+            : this(new AgentProviderCatalog(), AgentKind.DeepSeekHarness,
                 SettingsStorage.Log)
         {
         }

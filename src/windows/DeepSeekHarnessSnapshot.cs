@@ -1309,7 +1309,7 @@ internal sealed class DeepSeekHarnessSnapshotReader
             }
             if (document.schemaVersion != 1 ||
                 !IsSupportedBridgeVersion(document.bridgeVersion) ||
-                !String.Equals(document.dshVersion, "0.2.0-rc.2",
+                !String.Equals(document.dshVersion, "0.2.1-rc.2",
                     StringComparison.Ordinal) ||
                 !String.Equals(document.profile, "desktop",
                     StringComparison.Ordinal) ||
@@ -1619,8 +1619,8 @@ internal static class DeepSeekHarnessSnapshotReducer
                 else
                 {
                     aggregateState = selected.State;
-                    aggregateLabel = CodexSessionMonitor.StateLabel(
-                        selected.State);
+                    aggregateLabel = GeneratedHaloSpec.State(
+                        selected.State).Label;
                     statusKey = selected.StatusDetailKey;
                     presence = AgentPresenceState.Active;
                     phase = selected.TurnPhase;
@@ -1664,8 +1664,8 @@ internal static class DeepSeekHarnessSnapshotReducer
                 aggregateState = HaloState.Idle;
                 aggregateLabel = source != null &&
                     source.StatusDetailKey == "status.deepseek.not_configured"
-                    ? "UNKNOWN" : CodexSessionMonitor.StateLabel(
-                        HaloState.Idle);
+                    ? "UNKNOWN" : GeneratedHaloSpec.State(
+                        HaloState.Idle).Label;
                 statusKey = source == null
                     ? "status.deepseek.unknown"
                     : source.StatusDetailKey;

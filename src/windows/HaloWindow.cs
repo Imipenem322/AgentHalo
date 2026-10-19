@@ -46,7 +46,6 @@ public sealed class HaloWindow : Window
         private readonly HaloSettings settings;
         private readonly AgentProviderCatalog providerCatalog;
         private readonly AgentMonitorCoordinator coordinator;
-        private readonly DeepSeekHarnessSetup deepSeekSetup;
         private readonly HaloVisual visual;
         private readonly DetailsWindow details;
         private readonly Forms.NotifyIcon tray;
@@ -63,7 +62,7 @@ public sealed class HaloWindow : Window
         private bool closing;
         private HaloState? demoState;
         private ErrorPresentation? demoErrorPresentation;
-        private bool codexWasForeground;
+        private bool trackedAgentWasForeground;
         private IntPtr windowHandle;
         private IntPtr topmostGuardForeground;
         private DateTime nextTopmostGuardUtc = DateTime.MinValue;
@@ -74,20 +73,11 @@ public sealed class HaloWindow : Window
         private string dimmedErrorThreadId;
         private AgentKind dimmedErrorAgent;
         private DateTime nextRuntimeStateRefreshUtc = DateTime.MinValue;
-        private DateTime nextDeepSeekSetupUtc = DateTime.MinValue;
-        private string deepSeekSetupError;
         private ErrorPresentation errorPresentation = ErrorPresentation.Flashing;
 
         public HaloWindow(HaloSettings appSettings)
-            : this(appSettings, null)
-        {
-        }
-
-        internal HaloWindow(HaloSettings appSettings,
-            DeepSeekHarnessSetup automaticDeepSeekSetup)
         {
             settings = appSettings;
-            deepSeekSetup = automaticDeepSeekSetup;
             ConfigureLocalization(settings);
             providerCatalog = new AgentProviderCatalog();
             if (settings.NormalizeAgentSelection(providerCatalog))
@@ -125,7 +115,6 @@ public sealed class HaloWindow : Window
             details = new DetailsWindow();
             details.SetEnabledAgentDescriptors(EnabledAgentDescriptors());
             details.SetAgentSwitchingEnabled(!settings.Paused);
-            details.AgentFocusRequested += RequestFocusedAgent;
             coordinator = new AgentMonitorCoordinator(providerCatalog,
                 initialFocus);
             coordinator.Changed += OnCoordinatorChanged;
@@ -254,7 +243,7 @@ public sealed class HaloWindow : Window
             activeErrorThreadId = null;
             errorDimmedUtc = DateTime.MinValue;
             errorPresentation = ErrorPresentation.Flashing;
-            codexWasForeground = coordinator.IsForeground(
+            trackedAgentWasForeground = coordinator.IsForeground(
                 GetForegroundWindow());
         }
 
@@ -316,10 +305,9 @@ public sealed class HaloWindow : Window
             RestorePosition();
             RecoverHaloIfOffscreen();
             coordinator.Start();
-            CheckDeepSeekSetup(DateTime.UtcNow);
             RefreshState();
             IntPtr foregroundHandle = GetForegroundWindow();
-            codexWasForeground = coordinator.IsForeground(foregroundHandle);
+            trackedAgentWasForeground = coordinator.IsForeground(foregroundHandle);
             CheckAndRestoreTopmost(foregroundHandle, true);
             foregroundTimer.Start();
             if (performanceTimer != null)
@@ -353,68 +341,19 @@ public sealed class HaloWindow : Window
             }
         }
 
-        private void CheckDeepSeekSetup(DateTime now)
-        {
-            if (deepSeekSetup == null || settings.Paused ||
-                deepSeekSetup.Ready && settings.DeepSeekHarnessSetupComplete ||
-                now < nextDeepSeekSetupUtc)
-            {
-                return;
-            }
-            nextDeepSeekSetupUtc = now.AddSeconds(5);
-            if (deepSeekSetup.TryInstall())
-            {
-                string previousFocus = settings.FocusedAgent;
-                bool previouslyEnabled = settings.IsAgentEnabled(
-                    AgentKind.DeepSeekHarness);
-                if (DeepSeekHarnessSetup.EnableMonitoring(settings))
-                {
-                    AgentKind target = providerCatalog.ParseOrDefault(
-                        settings.FocusedAgent);
-                    // Let the coordinator commit focus and persist it together.
-                    settings.FocusedAgent = previousFocus;
-                    if (target == coordinator.FocusedKind)
-                        SettingsStorage.Save(settings);
-                    else
-                        RequestFocusedAgent(target);
-                    if (coordinator.FocusedKind != target)
-                    {
-                        settings.DeepSeekHarnessSetupComplete = false;
-                        if (!previouslyEnabled)
-                            settings.EnabledAgents.Remove("deepseek-harness");
-                    }
-                    if (details.IsVisible)
-                    {
-                        SyncDetails();
-                    }
-                    BuildTrayMenu();
-                }
-                return;
-            }
-            if (!String.IsNullOrEmpty(deepSeekSetup.Error) &&
-                deepSeekSetupError != deepSeekSetup.Error)
-            {
-                deepSeekSetupError = deepSeekSetup.Error;
-                tray.ShowBalloonTip(8000, "Agent Halo",
-                    L10n.Instance.Format("deepseek.setup.error",
-                        deepSeekSetupError), Forms.ToolTipIcon.Warning);
-            }
-        }
-
         private void OnForegroundTick(object sender, EventArgs e)
         {
             DateTime now = DateTime.UtcNow;
-            CheckDeepSeekSetup(now);
             IntPtr foregroundHandle = GetForegroundWindow();
             CheckAndRestoreTopmost(foregroundHandle, false);
             if (settings.Paused)
             {
-                codexWasForeground = false;
+                trackedAgentWasForeground = false;
                 return;
             }
             bool focusedAgentIsForeground = coordinator.IsForeground(
                 foregroundHandle);
-            if (focusedAgentIsForeground && !codexWasForeground &&
+            if (focusedAgentIsForeground && !trackedAgentWasForeground &&
                 !demoState.HasValue &&
                 aggregate != null && aggregate.State == HaloState.Done)
             {
@@ -427,7 +366,7 @@ public sealed class HaloWindow : Window
                     errorPresentation = ErrorPresentation.Bright;
                     errorDimmedUtc = DateTime.MinValue;
                 }
-                else if (codexWasForeground)
+                else if (trackedAgentWasForeground)
                 {
                     errorPresentation = ErrorPresentation.Dim;
                     errorDimmedUtc = now;
@@ -436,18 +375,18 @@ public sealed class HaloWindow : Window
                     dimmedErrorAgent = aggregate.FocusedAgent;
                 }
             }
-            // Session files do not change when Codex exits, and a completed
-            // session expires without a new lifecycle event. Re-evaluate the
-            // aggregate periodically so both transitions reach the halo.
+            // DSH snapshots can expire without a new projection event, and a
+            // completed task expires without another lifecycle update.
+            // Re-evaluate periodically so both transitions reach the halo.
             if (ShouldRefreshRuntimeState(
-                    focusedAgentIsForeground != codexWasForeground,
+                    focusedAgentIsForeground != trackedAgentWasForeground,
                     IsDimmedErrorDue(now, errorDimmedUtc),
                     now,
                     nextRuntimeStateRefreshUtc))
             {
                 RefreshState();
             }
-            codexWasForeground = focusedAgentIsForeground;
+            trackedAgentWasForeground = focusedAgentIsForeground;
         }
 
         private void OnSourceInitialized(object sender, EventArgs e)
@@ -601,7 +540,7 @@ public sealed class HaloWindow : Window
             if (demoState.HasValue)
             {
                 aggregate.State = demoState.Value;
-                aggregate.Label = CodexSessionMonitor.StateLabel(demoState.Value);
+                aggregate.Label = GeneratedHaloSpec.State(demoState.Value).Label;
                 aggregate.Detail = "Preview mode";
                 aggregate.Presence = AgentPresenceState.Active;
             }
@@ -614,17 +553,6 @@ public sealed class HaloWindow : Window
             providerSnapshot.Aggregate = aggregate;
             tray.Text = ("Agent Halo · " + aggregate.Label).Substring(0,
                 Math.Min(63, ("Agent Halo · " + aggregate.Label).Length));
-            if (!settings.Paused && deepSeekSetup != null &&
-                deepSeekSetup.Ready && aggregate.FocusedAgent ==
-                    AgentKind.DeepSeekHarness &&
-                providerSnapshot.Integration.State ==
-                    AgentIntegrationState.NotConfigured)
-            {
-                providerSnapshot.Details.StatusDetailKey =
-                    nowUtc - deepSeekSetup.PreparedUtc < TimeSpan.FromSeconds(15)
-                        ? "status.deepseek.connecting"
-                        : "status.deepseek.start_or_restart";
-            }
             if (details.IsVisible)
             {
                 SyncDetails();
@@ -972,34 +900,6 @@ public sealed class HaloWindow : Window
                 }).ToList();
         }
 
-        private void RequestFocusedAgent(AgentKind targetKind)
-        {
-            if (closing || settings.Paused ||
-                targetKind == coordinator.FocusedKind)
-            {
-                return;
-            }
-            try
-            {
-                AgentProviderSnapshot firstSnapshot;
-                bool switched = coordinator.TrySwitch(targetKind, settings,
-                    delegate
-                    {
-                        SettingsStorage.SaveAtomicOrThrow(settings);
-                        return true;
-                    }, out firstSnapshot);
-                if (!switched)
-                {
-                    SettingsStorage.Log("Agent switch was rejected: " +
-                        coordinator.LastSwitchError);
-                }
-            }
-            catch (Exception ex)
-            {
-                SettingsStorage.Log("Agent switch failed: " + ex.Message);
-            }
-        }
-
         private void BuildTrayMenu()
         {
             Forms.ContextMenuStrip menu = new Forms.ContextMenuStrip();
@@ -1018,18 +918,6 @@ public sealed class HaloWindow : Window
                 }));
             };
             menu.Items.Add(topmost);
-
-            Forms.ToolStripMenuItem startup = new Forms.ToolStripMenuItem(L10n.Instance["menu.launch_at_startup"]);
-            startup.Checked = StartupManager.IsEnabled();
-            startup.CheckOnClick = true;
-            startup.CheckedChanged += delegate
-            {
-                Dispatcher.BeginInvoke(new Action(delegate
-                {
-                    StartupManager.SetEnabled(startup.Checked);
-                }));
-            };
-            menu.Items.Add(startup);
 
             Forms.ToolStripMenuItem pause = new Forms.ToolStripMenuItem(L10n.Instance["menu.pause_monitor"]);
             pause.Checked = settings.Paused;
@@ -1061,38 +949,6 @@ public sealed class HaloWindow : Window
                 }));
             };
             menu.Items.Add(pause);
-
-            Forms.ToolStripMenuItem currentAgent =
-                new Forms.ToolStripMenuItem(
-                    L10n.Instance["menu.current_agent"]);
-            foreach (AgentProviderDescriptor descriptor in
-                providerCatalog.Descriptors)
-            {
-                if (!settings.IsAgentEnabled(descriptor.Kind,
-                        providerCatalog))
-                {
-                    continue;
-                }
-                AgentKind selectedKind = descriptor.Kind;
-                string agentTitle = String.IsNullOrWhiteSpace(
-                    descriptor.DisplayNameKey)
-                    ? descriptor.DisplayName
-                    : L10n.Instance[descriptor.DisplayNameKey];
-                Forms.ToolStripMenuItem agentItem =
-                    new Forms.ToolStripMenuItem(agentTitle);
-                agentItem.AccessibleRole = Forms.AccessibleRole.RadioButton;
-                agentItem.Checked = coordinator.FocusedKind == selectedKind;
-                agentItem.Enabled = !settings.Paused;
-                agentItem.Click += delegate
-                {
-                    Dispatcher.BeginInvoke(new Action(delegate
-                    {
-                        RequestFocusedAgent(selectedKind);
-                    }));
-                };
-                currentAgent.DropDownItems.Add(agentItem);
-            }
-            menu.Items.Add(currentAgent);
 
             // Language submenu
             var languageItem = new Forms.ToolStripMenuItem(L10n.Instance["menu.language"]);
@@ -1229,7 +1085,6 @@ public sealed class HaloWindow : Window
                 performanceTimer.Stop();
             }
             SavePosition();
-            details.AgentFocusRequested -= RequestFocusedAgent;
             coordinator.Changed -= OnCoordinatorChanged;
             details.Close();
             coordinator.Dispose();

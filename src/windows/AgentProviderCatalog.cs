@@ -25,23 +25,12 @@ internal sealed class AgentProviderCatalog
             {
                 new AgentProviderDescriptor
                 {
-                    Kind = AgentKind.Codex,
-                    Key = "codex",
-                    DisplayName = "Codex",
-                    DisplayNameKey = "agent.codex",
-                    Order = 0,
-                    EnabledByDefault = true,
-                    Capabilities = CodexAgentProvider.SupportedCapabilities,
-                    CreateProvider = delegate { return new CodexAgentProvider(); }
-                },
-                new AgentProviderDescriptor
-                {
                     Kind = AgentKind.DeepSeekHarness,
                     Key = "deepseek-harness",
                     DisplayName = "DeepSeek Harness",
                     DisplayNameKey = "agent.deepseek-harness",
-                    Order = 1,
-                    EnabledByDefault = false,
+                    Order = 0,
+                    EnabledByDefault = true,
                     Capabilities = DeepSeekHarnessAgentProvider.SupportedCapabilities,
                     CreateProvider = delegate
                     {
@@ -109,11 +98,6 @@ internal sealed class AgentProviderCatalog
         {
             get
             {
-                AgentProviderDescriptor codex = Find(AgentKind.Codex);
-                if (codex != null)
-                {
-                    return codex.Kind;
-                }
                 AgentProviderDescriptor enabled = descriptors.FirstOrDefault(
                     delegate(AgentProviderDescriptor descriptor)
                     {

@@ -1,4 +1,3 @@
-# Replace the placeholder with the absolute path to index.mjs before applying.
 - insert:
-    - id: agenthalo-deepseek-harness-observer
-      name: "__AGENTHALO_PLUGIN_MJS_ABSOLUTE_PATH__"
+    - id: agenthalo-dsh
+      name: dsh-agenthalo

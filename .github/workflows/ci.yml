@@ -1,55 +1,163 @@
-name: cross-platform-contract
+name: dsh-plugin
 
 on:
   push:
     paths:
-      - 'src/**'
-      - 'scripts/**'
+      - 'package.json'
+      - 'src/windows/**'
+      - 'src/integrations/deepseek-harness/**'
+      - 'src/shared/spec/**'
+      - 'src/shared/locales/**'
+      - 'scripts/build-windows.ps1'
+      - 'scripts/generate_shared.py'
+      - 'scripts/validate_schema.py'
+      - 'scripts/check_shared.py'
+      - 'scripts/requirements-ci.in'
       - '.github/workflows/**'
-      - 'README.md'
-      - 'README.zh-CN.md'
-      - 'docs/DEEPSEEK_HARNESS_INTEGRATION.zh-CN.md'
+      - '.gitignore'
   pull_request:
     paths:
-      - 'src/**'
-      - 'scripts/**'
+      - 'package.json'
+      - 'src/windows/**'
+      - 'src/integrations/deepseek-harness/**'
+      - 'src/shared/spec/**'
+      - 'src/shared/locales/**'
+      - 'scripts/build-windows.ps1'
+      - 'scripts/generate_shared.py'
+      - 'scripts/validate_schema.py'
+      - 'scripts/check_shared.py'
+      - 'scripts/requirements-ci.in'
       - '.github/workflows/**'
-      - 'README.md'
-      - 'README.zh-CN.md'
-      - 'docs/DEEPSEEK_HARNESS_INTEGRATION.zh-CN.md'
+      - '.gitignore'
 
 jobs:
-  shared:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-      - name: Install schema validator
-        run: python -m pip install -r scripts/requirements-ci.in
-      - run: python scripts/validate_schema.py
-      - run: python scripts/generate_shared.py --check
-      - run: python scripts/check_shared.py
-
-  windows:
-    needs: shared
+  dsh-windows:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v6
-      - shell: powershell
-        run: |
-          ./scripts/build-windows.ps1
-          ./outputs/AgentHalo/AgentHalo.exe --self-test ./outputs/windows-self-test.txt
-          Get-Content ./outputs/windows-self-test.txt
 
-  macos:
-    needs: shared
-    runs-on: macos-15
-    steps:
-      - uses: actions/checkout@v6
-      - name: Run macOS core checks
-        working-directory: src/macos
-        run: swift run AgentHaloCoreChecks
-      - working-directory: src/macos
-        run: swift build -c release --product AgentHaloMac
+      - name: Check DSH plugin JavaScript syntax
+        shell: pwsh
+        run: |
+          node --check ./src/integrations/deepseek-harness/index.mjs
+          if ($LASTEXITCODE -ne 0) {
+            throw "DSH plugin entry syntax check failed with exit code $LASTEXITCODE"
+          }
+          node --check ./src/integrations/deepseek-harness/launcher.mjs
+          if ($LASTEXITCODE -ne 0) {
+            throw "DSH launcher syntax check failed with exit code $LASTEXITCODE"
+          }
+
+      - name: Build isolated DSH package and run focused self-test
+        shell: pwsh
+        run: |
+          $stageRoot = Join-Path $env:RUNNER_TEMP 'agenthalo-dsh-stage'
+          ./scripts/build-windows.ps1 -OutputRoot $stageRoot
+
+          $package = Join-Path $stageRoot 'dsh-agenthalo'
+          $exe = Join-Path $package 'dist/windows/AgentHalo.Dsh.exe'
+          $requiredFiles = @(
+            (Join-Path $package 'package.json'),
+            (Join-Path $package 'src/integrations/deepseek-harness/index.mjs'),
+            (Join-Path $package 'src/integrations/deepseek-harness/launcher.mjs'),
+            (Join-Path $package 'src/integrations/deepseek-harness/cordis.patch.yml'),
+            $exe,
+            (Join-Path $package 'dist/windows/locales/zh.json'),
+            (Join-Path $package 'dist/windows/locales/en.json')
+          )
+          foreach ($file in $requiredFiles) {
+            if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {
+              throw "Staged DSH package is missing: $file"
+            }
+          }
+
+          $selfTestOutput = Join-Path $env:RUNNER_TEMP 'agenthalo-dsh-self-test.txt'
+          $selfTest = Start-Process -FilePath $exe `
+            -ArgumentList @('--dsh-self-test', "`"$selfTestOutput`"") `
+            -WindowStyle Hidden -Wait -PassThru
+          if ($selfTest.ExitCode -ne 0) {
+            throw "DSH self-test failed with exit code $($selfTest.ExitCode)"
+          }
+          if (-not (Test-Path -LiteralPath $selfTestOutput -PathType Leaf)) {
+            throw 'DSH self-test did not write its output file.'
+          }
+          Get-Content -LiteralPath $selfTestOutput
+
+      - name: Detect shared contract changes
+        id: shared-changes
+        shell: pwsh
+        run: |
+          $event = Get-Content -LiteralPath $env:GITHUB_EVENT_PATH -Raw | ConvertFrom-Json
+          $runSharedChecks = $true
+          if ($env:GITHUB_EVENT_NAME -eq 'pull_request') {
+            $baseSha = [string]$event.pull_request.base.sha
+          } else {
+            $baseSha = [string]$event.before
+          }
+
+          if (-not [string]::IsNullOrWhiteSpace($baseSha) -and $baseSha -notmatch '^0+$') {
+            git fetch --no-tags --depth=1 origin $baseSha
+            if ($LASTEXITCODE -eq 0) {
+              $changed = git diff --name-only $baseSha $env:GITHUB_SHA -- `
+                src/shared/spec src/shared/locales scripts/generate_shared.py `
+                scripts/validate_schema.py scripts/check_shared.py scripts/requirements-ci.in
+              if ($LASTEXITCODE -ne 0) {
+                throw 'Could not inspect changed paths for shared contract checks.'
+              }
+              $runSharedChecks = [bool]$changed
+            }
+          } elseif ($env:GITHUB_EVENT_NAME -eq 'push') {
+            $defaultBranch = [string]$event.repository.default_branch
+            $branchRef = [string]$event.ref
+            if (-not [string]::IsNullOrWhiteSpace($defaultBranch) -and
+                -not [string]::IsNullOrWhiteSpace($branchRef)) {
+              $defaultTrackingRef = "refs/remotes/origin/$defaultBranch"
+              git fetch --no-tags --unshallow origin $branchRef
+              if ($LASTEXITCODE -eq 0) {
+                git fetch --no-tags origin `
+                  "refs/heads/$defaultBranch:$defaultTrackingRef"
+                if ($LASTEXITCODE -eq 0) {
+                  $mergeBase = git merge-base $defaultTrackingRef $env:GITHUB_SHA
+                  if ($LASTEXITCODE -eq 0 -and
+                      -not [string]::IsNullOrWhiteSpace([string]$mergeBase)) {
+                    $changed = git diff --name-only $mergeBase $env:GITHUB_SHA -- `
+                      src/shared/spec src/shared/locales scripts/generate_shared.py `
+                      scripts/validate_schema.py scripts/check_shared.py scripts/requirements-ci.in
+                    if ($LASTEXITCODE -ne 0) {
+                      throw 'Could not inspect changed paths from the default-branch merge base.'
+                    }
+                    $runSharedChecks = [bool]$changed
+                  }
+                }
+              }
+            }
+          }
+
+          "run=$($runSharedChecks.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+
+      - name: Set up Python for changed shared contracts
+        if: steps.shared-changes.outputs.run == 'true'
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install shared schema validator
+        if: steps.shared-changes.outputs.run == 'true'
+        run: python -m pip install -r scripts/requirements-ci.in
+
+      - name: Check changed shared contracts
+        if: steps.shared-changes.outputs.run == 'true'
+        shell: pwsh
+        run: |
+          python scripts/validate_schema.py
+          if ($LASTEXITCODE -ne 0) {
+            throw "Shared schema validation failed with exit code $LASTEXITCODE"
+          }
+          python scripts/generate_shared.py --check
+          if ($LASTEXITCODE -ne 0) {
+            throw "Generated shared files are out of date (exit code $LASTEXITCODE)"
+          }
+          python scripts/check_shared.py
+          if ($LASTEXITCODE -ne 0) {
+            throw "Shared contract checks failed with exit code $LASTEXITCODE"
+          }

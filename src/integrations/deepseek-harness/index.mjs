@@ -1,12 +1,13 @@
 import { mkdir, rename, rm, writeFile } from "node:fs/promises";
-import os from "node:os";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { createManagedHelper, resolveAgentHaloHome } from "./launcher.mjs";
 
-const PLUGIN_NAME = "agenthalo-deepseek-harness-observer";
-const PROJECTION_KEY = "agentHaloDeepSeekHarnessObserver";
+const PLUGIN_NAME = "agenthalo-dsh";
+const PROJECTION_KEY = "agentHaloDsh";
 const BRIDGE_VERSION = "1.0.0";
-const DSH_VERSION = "0.2.0-rc.2";
+const SUPPORTED_DSH_VERSION = "0.2.1-rc.2";
 const DESKTOP_APP_ID = "com.deepseek.dsh";
 const HEARTBEAT_MS = 2000;
 const REFRESH_DEBOUNCE_MS = 100;
@@ -140,14 +141,25 @@ const observationProjection = {
 export const name = PLUGIN_NAME;
 export const inject = ["sessionProjections", "agents", "userQuestions", "subagents"];
 
+function readSupportedDshVersion(runtimeDir) {
+	const manifestPath = path.join(runtimeDir, "node_modules", "@deepseek-ai", "dsh", "package.json");
+	const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+	if (manifest.version !== SUPPORTED_DSH_VERSION) {
+		throw new Error(`Unsupported DSH version ${String(manifest.version)} at ${manifestPath}; expected ${SUPPORTED_DSH_VERSION}.`);
+	}
+	return manifest.version;
+}
+
 export function apply(ctx) {
+	if (process.platform !== "win32") {
+		throw new Error("AgentHalo DSH supports Windows only.");
+	}
+	const dataRoot = resolveAgentHaloHome();
 	const instanceId = randomUUID();
 	const profileDir = path.resolve(process.argv[3]);
 	const runtimeDir = path.resolve(process.argv[2]);
-	const runtimeRoot = path.join(
-		process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local"),
-		"CodexHalo", "integrations", "deepseek-harness", "runtime"
-	);
+	const dshVersion = readSupportedDshVersion(runtimeDir);
+	const runtimeRoot = path.join(dataRoot, "integrations", "deepseek-harness", "runtime");
 	const snapshotPath = path.join(runtimeRoot, `${instanceId}.json`);
 	const hostStartUtc = new Date(Date.now() - process.uptime() * 1000).toISOString();
 	const questionServiceAvailable = ctx.userQuestions !== undefined;
@@ -162,6 +174,8 @@ export function apply(ctx) {
 	let lastTasks = [];
 	let lastBaselineReady = false;
 	let lastCapabilities = unknownCapabilities();
+	let startupFailureLogged = false;
+	const helper = createManagedHelper(dataRoot);
 
 	ctx.sessionProjections.register(observationProjection);
 
@@ -325,7 +339,17 @@ export function apply(ctx) {
 			pendingApprovalCount += observation.pendingApprovals.length;
 			const questions = member.values.userQuestions?.active;
 			if (Array.isArray(questions)) {
-				blockingQuestionCount += questions.filter(item => item.state === "open").length;
+				const blockingCalls = new Set(questions.filter(item => item.state === "open")
+					.map(item => item.callId));
+				const continuedCalls = new Set(questions.filter(item => item.state === "continued")
+					.map(item => item.callId));
+				// DSH's legacy blocking questions are absent from the userQuestions projection.
+				for (const call of observation.activeTools) {
+					if (call.name === "ask_user_question" && !continuedCalls.has(call.callId)) {
+						blockingCalls.add(call.callId);
+					}
+				}
+				blockingQuestionCount += blockingCalls.size;
 			}
 			if (member !== root && member.agent.status === "running") relatedRunning++;
 			lastActivityMs = Math.max(lastActivityMs, Number(observation.lastActivityMs) || 0);
@@ -436,7 +460,7 @@ export function apply(ctx) {
 		const document = {
 			schemaVersion: 1,
 			bridgeVersion: BRIDGE_VERSION,
-			dshVersion: DSH_VERSION,
+			dshVersion,
 			profile: "desktop",
 			instanceId,
 			hostPid: process.pid,
@@ -491,10 +515,18 @@ export function apply(ctx) {
 
 	scheduleRefresh();
 	heartbeat = setInterval(scheduleRefresh, HEARTBEAT_MS);
-	ctx.effect(() => () => {
+	ctx.effect(() => async () => {
 		disposed = true;
 		clearInterval(heartbeat);
 		if (refreshTimer !== undefined) clearTimeout(refreshTimer);
-		void inflight.then(() => rm(snapshotPath, { force: true })).catch(() => {});
+		helper.requestStop();
+		await inflight.catch(() => {});
+		await rm(snapshotPath, { force: true }).catch(() => {});
+		await helper.dispose();
+	});
+	void helper.start().catch(error => {
+		if (startupFailureLogged) return;
+		startupFailureLogged = true;
+		console.error(`[${PLUGIN_NAME}] unable to start the AgentHalo window: ${error.message}`);
 	});
 }

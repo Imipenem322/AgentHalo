@@ -1,4 +1,5 @@
-# Build and diagnostic outputs
+# Local build and diagnostic outputs. The release binary at
+# dist/windows/AgentHalo.Dsh.exe must remain trackable for GitHub installs.
 outputs/
 .build/
 bin/

@@ -1,11 +1,11 @@
 {
-  "name": "agenthalo-deepseek-harness-observer",
-  "version": "1.0.0",
+  "name": "agenthalo-dsh-runtime",
   "private": true,
   "type": "module",
   "main": "./index.mjs",
   "files": [
     "index.mjs",
+    "launcher.mjs",
     "package.json",
     "cordis.patch.yml"
   ]
