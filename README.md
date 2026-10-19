@@ -8,15 +8,17 @@ Based on [NePixe1/AgentHalo](https://github.com/NePixe1/AgentHalo), under the [M
 
 ## Install from DSH
 
-The GitHub installation address is not available yet. A stable installation commit must include the prebuilt `dist/windows/AgentHalo.Dsh.exe`; a CI build artifact by itself is not part of a GitHub repository install.
+The plugin includes its prebuilt Windows executable and locales. No installation-time build is required. The following fixed commit has been installed and enabled through the DSH plugin manager.
 
-After that commit is published, open DSH **Plugins → Add plugin** and enter its immutable commit address:
+Open DSH **Plugins → Add plugin** and enter:
 
 ```text
-github:Imipenem322/AgentHalo#<full-release-commit-sha>
+github:Imipenem322/AgentHalo#2d539465a804659c06449b9a3e0047d682ef3249
 ```
 
-Then enable **dsh-agenthalo**, the name shown in the plugin manager. This development branch targets DSH Desktop `0.2.1-rc.2`, Windows 10/11, and .NET Framework 4.8. The `0.16.5` Windows build and focused DSH self-test have passed, and the halo is visible during a real task. Approval handling, macOS, CPU impact, and multi-host handover remain unverified; see the [integration guide](docs/DEEPSEEK_HARNESS_INTEGRATION.zh-CN.md).
+Then enable **dsh-agenthalo**. This version supports DSH Desktop `0.2.1-rc.2`, Windows 10/11, and .NET Framework 4.8. The visible halo, details panel, real task states, input waiting, subagents, and plugin lifecycle have been verified. Approval handling, macOS, CPU impact, and multi-host handover remain unverified; see the [integration guide](docs/DEEPSEEK_HARNESS_INTEGRATION.zh-CN.md).
+
+If you previously installed a linked local directory, uninstall it and restart DSH before installing from GitHub. This clears the running Host's cached module paths.
 
 ## What it does
 

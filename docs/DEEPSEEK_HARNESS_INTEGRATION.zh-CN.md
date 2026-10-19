@@ -2,22 +2,22 @@
 
 Agent Halo DSH 是一个 Windows 专用的 DSH 桌面插件。插件负责启动和关闭原生状态光环；光环只读取 DSH 快照，不连接 Codex 会话或账户接口。
 
-当前开发分支面向 DSH Desktop `0.2.1-rc.2`。Windows `0.16.5` 原生程序构建和 DSH 专项自检已通过，实际 DSH 窗口中也确认了光环可见。真实任务状态、子代理、用户问题等待以及插件管理器停用/重新启用/卸载已完成端到端验收；审批、macOS、CPU 影响及多 Host 接管仍未验收。**目前尚无可供用户安装的 GitHub 发布提交**：正式提交必须包含预编译的 `dist/windows/AgentHalo.Dsh.exe` 及其所需文件。CI 产生的构建结果不会自动进入 GitHub 仓库安装内容。
+当前版本面向 DSH Desktop `0.2.1-rc.2`。Windows `0.16.5` 原生程序构建和 DSH 专项自检已通过，用户确认光环可见、详情显示正常。真实任务状态、子代理、用户问题等待、插件管理器停用/重新启用/卸载及固定 GitHub 提交安装均已验收；审批、macOS、CPU 影响及多 Host 接管仍未验收。
 
 ## 安装
 
-发布提交准备好后：
+安装方法：
 
 1. 在 DSH 中打开 **Plugins → Add plugin**。
 2. 输入固定到完整发布提交 SHA 的 GitHub 安装规格：
 
    ```text
-   github:Imipenem322/AgentHalo#<完整发布提交 SHA>
+   github:Imipenem322/AgentHalo#2d539465a804659c06449b9a3e0047d682ef3249
    ```
 
 3. 安装并启用插件管理器中显示的 **dsh-agenthalo**。
 
-使用包含 EXE 的发布提交。开发分支或不含 `dist/windows/AgentHalo.Dsh.exe` 的提交不能视为安装即用。
+上述固定提交包含 EXE、语言文件和入口，已通过实际 GitHub 安装并启用。安装不运行编译或 prepare 脚本。如果之前安装的是本地目录链接，卸载后先重启 DSH 再安装 GitHub 版本；实测同一 Host 内切换来源时，DSH 会暂时保留旧模块路径缓存，重启后恢复正常。
 
 启用后，插件会启动包内的 `AgentHalo.Dsh.exe`。正常释放时会清理本次快照，独立设置和按版本缓存的程序会保留。已通过 DSH 插件管理器实测停用、重新启用和启用状态下卸载：停用后开关关闭、旧 helper 消失且 Host 快照数归零；重新启用后新 helper 启动并生成 `baselineReady=true` 快照；卸载后 profile 中的依赖和 bundle 均移除，helper 消失且 Host 快照数归零。卸载会保留本地独立设置和版本缓存。本插件不会改写 DSH profile 来自动登记旧式 observer。
 
@@ -49,7 +49,7 @@ GitHub 插件包中的入口和 Cordis patch 位于 `src/integrations/deepseek-h
 
 已验收的 Windows 场景包括：`0.16.5` 原生程序构建和 DSH 专项自检；实际 DSH 窗口中的光环显示；真实根任务从 `Healthy / EXECUTING` 到 `COMPLETE` 的状态变化；子代理 `relatedRunning` 从 `0` 到 `1` 再回到 `0`；根任务标题和实际主模型 `deepseek-flash` 保持正确。另已复验旧式 `ask_user_question` 能显示为 `Healthy / NEEDS YOU` 且 `blockingQuestionCount=1`。强制结束隔离的 Desktop 后，Host 和光环进程均退出，重新启动后状态恢复。
 
-审批流程、macOS、CPU 影响测量和多 Host 所有权接管尚未验收。GitHub 安装也要等包含原生程序的发布提交完成后再验证。编译、自检或空闲快照不能替代这些项目的验收。
+固定提交 `2d539465a804659c06449b9a3e0047d682ef3249` 已通过插件管理器下载和启用；测试前清除了隔离环境的原生程序缓存，确认包内 EXE 能完成首次部署，原生端读取结果为 `Healthy / STANDBY`。用户确认详情内容清晰且无遮挡。审批流程、macOS、CPU 影响测量和多 Host 所有权接管尚未验收。
 
 ## 本地构建与专项检查
 

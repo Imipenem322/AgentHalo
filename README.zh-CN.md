@@ -8,15 +8,17 @@
 
 ## 从 DSH 安装
 
-目前还没有可用的 GitHub 安装地址。正式安装提交必须包含预编译文件 `dist/windows/AgentHalo.Dsh.exe`；只有 CI 构建产物并不代表它已进入 GitHub 插件安装内容。
+插件包已包含预编译 EXE 和语言文件，无需在安装时编译。以下固定提交已通过 DSH 插件管理器安装并启用。
 
-提交发布后，在 DSH 中打开 **Plugins → Add plugin**，输入固定到该提交的地址：
+在 DSH 中打开 **插件 → 添加插件**，输入：
 
 ```text
-github:Imipenem322/AgentHalo#<完整发布提交 SHA>
+github:Imipenem322/AgentHalo#2d539465a804659c06449b9a3e0047d682ef3249
 ```
 
-然后在插件管理器中启用界面显示的插件名 **dsh-agenthalo**。当前开发分支面向 DSH Desktop `0.2.1-rc.2`、Windows 10/11 和 .NET Framework 4.8。`0.16.5` Windows 原生程序构建及 DSH 专项自检已通过，真实任务中已确认光环可见。审批流程、macOS、CPU 影响和多 Host 接管尚未验收，详见[集成说明](docs/DEEPSEEK_HARNESS_INTEGRATION.zh-CN.md)。
+然后启用 **dsh-agenthalo**。当前版本支持 DSH Desktop `0.2.1-rc.2`、Windows 10/11 和 .NET Framework 4.8。已确认光环可见、详情显示正常，并完成真实任务、等待输入、子代理及插件启停验收。审批流程、macOS、CPU 影响和多 Host 接管尚未验收，详见[集成说明](docs/DEEPSEEK_HARNESS_INTEGRATION.zh-CN.md)。
+
+如果之前安装的是本地目录链接，卸载后请先重启 DSH，再安装 GitHub 版本，避免当前 Host 继续使用旧路径缓存。
 
 ## 功能
 

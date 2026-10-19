@@ -2,6 +2,8 @@ name: dsh-plugin
 
 on:
   push:
+    branches:
+      - 'codex/dsh-plugin'
     paths:
       - 'package.json'
       - 'src/windows/**'
@@ -115,7 +117,7 @@ jobs:
               git fetch --no-tags --unshallow origin $branchRef
               if ($LASTEXITCODE -eq 0) {
                 git fetch --no-tags origin `
-                  "refs/heads/$defaultBranch:$defaultTrackingRef"
+                  "refs/heads/${defaultBranch}:$defaultTrackingRef"
                 if ($LASTEXITCODE -eq 0) {
                   $mergeBase = git merge-base $defaultTrackingRef $env:GITHUB_SHA
                   if ($LASTEXITCODE -eq 0 -and
